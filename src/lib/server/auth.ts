@@ -34,12 +34,6 @@ export function makeAuth(env: App.Platform['env']) {
 		// Trust the same origin only.
 		trustedOrigins: [(env.PUBLIC_APP_URL ?? '').trim()],
 
-		// Better Auth 1.6+ wires an OpenTelemetry tracer that crashes on
-		// Cloudflare Workers (no global tracer registered → `trace.getTracer`
-		// throws). Disable telemetry; we already capture errors via
-		// observability.captureException.
-		telemetry: { enabled: false },
-
 		emailAndPassword: { enabled: false },
 
 		session: {
