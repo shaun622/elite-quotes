@@ -19,8 +19,9 @@ declare global {
 		interface Platform {
 			env: {
 				DB: D1Database;
-				FILES: R2Bucket;
 				CACHE: KVNamespace;
+				/** Bound in PR3 when PDF rendering ships — see wrangler.toml. */
+				FILES?: R2Bucket;
 				BETTER_AUTH_SECRET: string;
 				RESEND_API_KEY: string;
 				RESEND_FROM_EMAIL: string;

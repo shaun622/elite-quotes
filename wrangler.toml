@@ -4,25 +4,24 @@ compatibility_flags = ["nodejs_compat"]
 pages_build_output_dir = ".svelte-kit/cloudflare"
 
 # ----- D1 database -----
-# Create with: wrangler d1 create elite-walls
-# Then paste the database_id below.
 [[d1_databases]]
 binding = "DB"
 database_name = "elite-walls"
-database_id = "REPLACE_ME_WITH_D1_ID"
+database_id = "9626c13e-82cc-4f42-bb98-21280e0063d6"
 migrations_dir = "drizzle"
 
-# ----- R2 bucket (PDFs, snapshots) -----
-# Create with: wrangler r2 bucket create elite-walls-files
-[[r2_buckets]]
-binding = "FILES"
-bucket_name = "elite-walls-files"
-
-# ----- KV namespace (sessions + idempotency) -----
-# Create with: wrangler kv:namespace create elite-walls-cache
+# ----- KV namespace (sessions + idempotency cache) -----
 [[kv_namespaces]]
 binding = "CACHE"
-id = "REPLACE_ME_WITH_KV_ID"
+id = "d4f2dea1ef9b4332bae2aae2edc41f1a"
+
+# ----- R2 bucket (PDFs, snapshots) -----
+# Disabled in PR1: R2 needs to be enabled in the Cloudflare dashboard first
+# (Storage & Databases → R2 → Enable; free for the first 10 GB).
+# Re-enable for PR3 when PDF rendering ships:
+# [[r2_buckets]]
+# binding = "FILES"
+# bucket_name = "elite-walls-files"
 
 # Secrets are set via:  wrangler pages secret put <NAME>
 # Required: BETTER_AUTH_SECRET, RESEND_API_KEY, RESEND_FROM_EMAIL,
