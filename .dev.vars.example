@@ -1,0 +1,21 @@
+# Copy to .dev.vars and fill in. .dev.vars is git-ignored.
+
+# 32+ random chars. Generate: openssl rand -base64 32
+BETTER_AUTH_SECRET=
+
+# Resend (https://resend.com) — magic-link transport
+RESEND_API_KEY=
+RESEND_FROM_EMAIL="Elite Walls <quotes@yourdomain.com>"
+
+# Only this email auto-creates the org + owner role on first sign-in.
+# Every other signup errors with "Contact your administrator" until invite flow lands in PR2.
+BOOTSTRAP_OWNER_EMAIL=
+
+# Public URL — used in magic-link emails. http://localhost:5173 in dev.
+PUBLIC_APP_URL=http://localhost:5173
+
+# Optional in PR1 — Sentry error tracking
+SENTRY_DSN=
+
+# Placeholder for PR2 (map)
+MAPTILER_KEY=
