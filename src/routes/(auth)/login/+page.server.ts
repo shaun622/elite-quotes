@@ -40,7 +40,7 @@ export const actions: Actions = {
 		const allowed = await isLoginAllowed({
 			db,
 			email,
-			bootstrapEmail: platform.env.BOOTSTRAP_OWNER_EMAIL
+			bootstrapEmail: (platform.env.BOOTSTRAP_OWNER_EMAIL ?? '').trim()
 		});
 
 		if (!allowed) {

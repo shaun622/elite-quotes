@@ -36,7 +36,7 @@ export const handle: Handle = async ({ event, resolve }) => {
 			const membership = await resolveOrCreateMembership({
 				db,
 				user: event.locals.user,
-				bootstrapEmail: env.BOOTSTRAP_OWNER_EMAIL
+				bootstrapEmail: (env.BOOTSTRAP_OWNER_EMAIL ?? '').trim()
 			});
 			if (membership) {
 				event.locals.org = {
