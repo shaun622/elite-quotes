@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
-	import { invalidateAll } from '$app/navigation';
+	import { goto, invalidateAll } from '$app/navigation';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
@@ -11,6 +11,27 @@
 	function fmt(ms: number): string {
 		const d = new Date(ms);
 		return d.toLocaleDateString('en-AU', { day: '2-digit', month: 'short', year: 'numeric' });
+	}
+
+	function openQuote(id: string) {
+		void goto(`/quotes/${id}/1`);
+	}
+
+	/** Row click — only navigate if the click didn't land on an interactive
+	 *  child (the delete form, buttons, links). Lets the trash icon and the
+	 *  quote-number anchor keep their own behaviours. */
+	function onRowClick(e: MouseEvent, id: string) {
+		const target = e.target as HTMLElement | null;
+		if (!target) return;
+		if (target.closest('button, a, form, input')) return;
+		openQuote(id);
+	}
+
+	function onRowKey(e: KeyboardEvent, id: string) {
+		if (e.key === 'Enter' || e.key === ' ') {
+			e.preventDefault();
+			openQuote(id);
+		}
 	}
 </script>
 
@@ -47,13 +68,22 @@
 			</thead>
 			<tbody>
 				{#each data.quotes as q (q.id)}
-					<tr class:deleting={pendingDeleteId === q.id}>
-						<td><a href="/quotes/{q.id}/1">{q.quoteNumber}</a></td>
+					<tr
+						class="row"
+						class:deleting={pendingDeleteId === q.id}
+						tabindex="0"
+						role="button"
+						aria-label="Open Quote #{q.quoteNumber}"
+						onclick={(e) => onRowClick(e, q.id)}
+						onkeydown={(e) => onRowKey(e, q.id)}
+					>
+						<td><a href="/quotes/{q.id}/1" tabindex="-1">{q.quoteNumber}</a></td>
 						<td>{q.clientName ?? '—'}</td>
 						<td>{q.siteAddress ?? '—'}</td>
 						<td><span class="badge {q.status}">{q.status}</span></td>
 						<td>{fmt(Number(q.updatedAt))}</td>
 						<td class="actions-col">
+							<span class="chev" aria-hidden="true">›</span>
 							<form
 								method="POST"
 								action="?/delete"
@@ -177,11 +207,39 @@
 		text-transform: uppercase;
 		letter-spacing: 0.04em;
 	}
-	tbody tr:hover {
-		background: rgba(255, 255, 255, 0.02);
+	tbody tr.row {
+		cursor: pointer;
+	}
+	tbody tr.row:hover {
+		background: rgba(255, 138, 28, 0.06);
+	}
+	tbody tr.row:focus-visible {
+		outline: 2px solid var(--accent);
+		outline-offset: -2px;
+		background: rgba(255, 138, 28, 0.06);
 	}
 	tbody tr.deleting {
 		opacity: 0.5;
+		pointer-events: none;
+	}
+	.actions-col {
+		position: relative;
+		white-space: nowrap;
+	}
+	.chev {
+		display: inline-block;
+		color: var(--text-muted);
+		font-size: 1.3rem;
+		line-height: 1;
+		margin-right: 0.5rem;
+		vertical-align: middle;
+		opacity: 0;
+		transition: opacity 0.15s, transform 0.15s;
+	}
+	tbody tr.row:hover .chev,
+	tbody tr.row:focus-visible .chev {
+		opacity: 0.8;
+		transform: translateX(2px);
 	}
 	a {
 		color: var(--accent);
