@@ -124,13 +124,12 @@
 	/** Index of the sub-segment currently being drawn / extended. Null = "pen up". */
 	let activeSegIdx = $state<number | null>(null);
 
-	/** Top-level interaction tool. Pan = clicks ignored, just navigate. */
-	// svelte-ignore state_referenced_locally
-	let tool = $state<Tool>(
-		(pathToSegments(initialData.walls[0]?.pathGeoJson ?? null)[0]?.length ?? 0) >= 2
-			? 'pan'
-			: 'draw'
-	);
+	/** Top-level interaction tool. Pan = clicks ignored, just navigate.
+	 *  Always defaults to Pan on load — even on a fresh wall — so a stray
+	 *  click while the page is settling doesn't drop a point. The user
+	 *  explicitly switches to Draw, or clicks "+ Add wall" which switches
+	 *  for them because the intent is unambiguous. */
+	let tool = $state<Tool>('pan');
 
 	let mapVersion = $state(0);
 
@@ -864,10 +863,14 @@
 			}
 		}
 
-		// Offset distance label — one per wall, anchored half-way between the
-		// wall's longest sub-segment and its offset line. Skipped when the wall
-		// has no segments long enough to read a label against.
-		if (mlCtors && aWall) {
+		// Offset distance label — only meaningful when the offset is large
+		// enough to render with visual separation from the wall. At a typical
+		// 100 mm boundary offset and zoom 19, the wall and offset line are 3-4
+		// pixels apart so the label just sits on top of the wall and reads as
+		// noise. Show only for offsets ≥ 500 mm; smaller offsets are still
+		// visible via the dashed parallel line itself plus the value in the
+		// wall settings panel.
+		if (mlCtors && aWall && offsetMm >= 500) {
 			let longestSeg: LngLat[] | null = null;
 			let longestLen = 0;
 			for (const seg of aSegments) {
