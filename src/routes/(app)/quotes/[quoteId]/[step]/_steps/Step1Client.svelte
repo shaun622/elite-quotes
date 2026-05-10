@@ -1,6 +1,10 @@
 <script lang="ts">
+	import { browser } from '$app/environment';
+	import { untrack } from 'svelte';
 	import type { QuoteData } from '$lib/schemas/quote';
-	import { staticMapUrl, type GeocodeSuggestion } from '$lib/mapbox';
+	import type { GeocodeSuggestion } from '$lib/mapbox';
+	// MapLibre is loaded lazily via dynamic import (~700 KB) — see initMap below.
+	import type { Map as MLMap, Marker as MLMarker } from 'maplibre-gl';
 
 	type SaveState = 'idle' | 'saving' | 'saved' | 'conflict' | 'error';
 
@@ -78,6 +82,7 @@
 				versionNumber = fresh.versionNumber;
 				addressQuery = fresh.data.site.address;
 				hasGeocode = fresh.data.site.geocode !== null;
+				mapSession++; // recreate map for the new property
 				setTimeout(() => (saveState = 'idle'), 2500);
 				return;
 			}
@@ -162,6 +167,7 @@
 		suggestions = [];
 		highlightIndex = -1;
 		hasGeocode = true;
+		mapSession++; // signal "external" geocode change → re-init map
 		void save();
 	}
 
@@ -192,7 +198,102 @@
 		hasGeocode = false;
 		suggestions = [];
 		suggestionsOpen = false;
+		mapSession++;
 		void save();
+	}
+
+	// --- interactive mini-map ----------------------------------------------
+
+	let mapContainer: HTMLDivElement | undefined = $state();
+	let mapStatus: 'idle' | 'loading' | 'ready' = $state('idle');
+	// Bumped whenever we want to re-center/re-init the map (new address picked,
+	// quote refresh after conflict). Marker drags do NOT bump this.
+	let mapSession = $state(0);
+	let mapInstance: MLMap | null = null;
+	let markerInstance: MLMarker | null = null;
+
+	$effect(() => {
+		mapSession; // reactive dep — incremented on external geocode change
+		if (!browser) return;
+
+		// Read non-reactively so a marker drag (which mutates data.site.geocode)
+		// doesn't re-fire this effect.
+		const geocode = untrack(() => data.site.geocode);
+		const container = mapContainer;
+		const token = mapboxToken;
+
+		if (!container || !geocode || !token) {
+			tearDown();
+			return;
+		}
+
+		mapStatus = 'loading';
+		let cancelled = false;
+
+		(async () => {
+			const [{ default: maplibregl }] = await Promise.all([
+				import('maplibre-gl'),
+				import('maplibre-gl/dist/maplibre-gl.css')
+			]);
+			if (cancelled) return;
+
+			tearDown();
+
+			const m = new maplibregl.Map({
+				container,
+				style: {
+					version: 8,
+					sources: {
+						sat: {
+							type: 'raster',
+							tiles: [
+								`https://api.mapbox.com/v4/mapbox.satellite/{z}/{x}/{y}@2x.png?access_token=${encodeURIComponent(token)}`
+							],
+							tileSize: 512,
+							attribution: '© Mapbox © Maxar'
+						}
+					},
+					layers: [{ id: 'sat', type: 'raster', source: 'sat', minzoom: 0, maxzoom: 22 }]
+				},
+				center: [geocode.lng, geocode.lat],
+				zoom: 18,
+				minZoom: 14,
+				maxZoom: 21,
+				attributionControl: { compact: true }
+			});
+
+			m.addControl(
+				new maplibregl.NavigationControl({ visualizePitch: false, showCompass: false }),
+				'top-right'
+			);
+
+			const marker = new maplibregl.Marker({ draggable: true, color: '#ff8a1c' })
+				.setLngLat([geocode.lng, geocode.lat])
+				.addTo(m);
+
+			marker.on('dragend', () => {
+				const ll = marker.getLngLat();
+				data.site.geocode = { lat: ll.lat, lng: ll.lng };
+				scheduleSave();
+			});
+
+			mapInstance = m;
+			markerInstance = marker;
+			mapStatus = 'ready';
+		})();
+
+		return () => {
+			cancelled = true;
+			tearDown();
+		};
+	});
+
+	function tearDown() {
+		markerInstance?.remove();
+		markerInstance = null;
+		mapInstance?.remove();
+		mapInstance = null;
+		mapStatus = 'idle';
 	}
 </script>
 
@@ -270,7 +371,11 @@
 									class:active={i === highlightIndex}
 									aria-selected={i === highlightIndex}
 								>
-									<button type="button" onclick={() => selectSuggestion(s)} onmouseenter={() => (highlightIndex = i)}>
+									<button
+										type="button"
+										onclick={() => selectSuggestion(s)}
+										onmouseenter={() => (highlightIndex = i)}
+									>
 										{s.label}
 									</button>
 								</li>
@@ -282,16 +387,16 @@
 		</label>
 
 		{#if hasGeocode && data.site.geocode && mapboxToken}
-			<div class="map-preview full" aria-label="Site preview">
-				<img
-					src={staticMapUrl({
-						token: mapboxToken,
-						lng: data.site.geocode.lng,
-						lat: data.site.geocode.lat
-					})}
-					alt="Satellite view of {data.site.address}"
-					loading="lazy"
-				/>
+			<div class="map-block full">
+				<div class="map-hint">
+					Drag the pin to fine-tune the property location if the address pin isn't quite right.
+				</div>
+				<div class="map-frame">
+					<div class="map" bind:this={mapContainer}></div>
+					{#if mapStatus !== 'ready'}
+						<div class="map-loading">Loading satellite…</div>
+					{/if}
+				</div>
 				<div class="map-meta">
 					{#if data.site.state}<span class="chip">{data.site.state}</span>{/if}
 					{#if data.site.postcode}<span class="chip">{data.site.postcode}</span>{/if}
@@ -438,21 +543,45 @@
 		color: var(--danger);
 	}
 
-	/* map preview */
-	.map-preview {
+	/* map block */
+	.map-block {
 		display: flex;
 		flex-direction: column;
 		gap: 0.5rem;
 		grid-column: 1 / -1;
 	}
-	.map-preview img {
-		display: block;
+	.map-hint {
+		font-size: 0.8rem;
+		color: var(--text-muted);
+	}
+	.map-frame {
+		position: relative;
 		width: 100%;
-		max-width: 600px;
+		max-width: 700px;
+		aspect-ratio: 5 / 3;
 		border-radius: 12px;
 		border: 1px solid var(--border);
-		aspect-ratio: 600 / 280;
-		object-fit: cover;
+		overflow: hidden;
+		background: #15161a;
+	}
+	.map {
+		position: absolute;
+		inset: 0;
+	}
+	:global(.maplibregl-marker) {
+		cursor: grab;
+	}
+	:global(.maplibregl-marker:active) {
+		cursor: grabbing;
+	}
+	.map-loading {
+		position: absolute;
+		inset: 0;
+		display: grid;
+		place-items: center;
+		color: var(--text-muted);
+		font-size: 0.85rem;
+		pointer-events: none;
 	}
 	.map-meta {
 		display: flex;
@@ -517,6 +646,9 @@
 	@media (max-width: 640px) {
 		.grid {
 			grid-template-columns: 1fr;
+		}
+		.map-frame {
+			aspect-ratio: 4 / 3;
 		}
 	}
 </style>
