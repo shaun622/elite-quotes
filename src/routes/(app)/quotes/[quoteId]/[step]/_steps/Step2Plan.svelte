@@ -11,6 +11,8 @@
 	import type { QuoteData } from '$lib/schemas/quote';
 	import {
 		haversineMeters,
+		lngLatToLocal,
+		localToLngLat,
 		multiPolylineLengthMeters,
 		offsetPolyline,
 		pathToSegments,
@@ -335,12 +337,18 @@
 	let mapStatus: 'idle' | 'loading' | 'ready' = $state('idle');
 	let mapInstance: MLMap | null = null;
 	let activeVertexMarkers: MLMarker[] = [];
+	let labelMarkers: MLMarker[] = [];
 	let mlCtors: {
 		Marker: typeof import('maplibre-gl').Marker;
 		LngLatBounds: typeof import('maplibre-gl').LngLatBounds;
 	} | null = null;
 	let snapHintCoords = $state<LngLat[] | null>(null);
 	let snapHintLabel = $state<string>('');
+
+	/** Screen position of the active segment's last vertex — used to anchor
+	 *  the Set-Length popover. Updated on map move and on segment changes. */
+	let activeEndScreenPos = $state<{ x: number; y: number } | null>(null);
+	let lastSegInput = $state<string>('');
 
 	const initialCenter: LngLat = (() => {
 		// svelte-ignore state_referenced_locally
@@ -420,15 +428,25 @@
 				m.addSource('snap-hint', { type: 'geojson', data: empty() });
 				m.addSource('hover-ghost', { type: 'geojson', data: empty() });
 
+				// Property boundary — solid orange perimeter, slightly translucent fill so
+				// the lot reads at a glance without obscuring the satellite imagery.
+				m.addLayer({
+					id: 'boundary-fill',
+					source: 'boundary',
+					type: 'fill',
+					paint: {
+						'fill-color': '#ff8a1c',
+						'fill-opacity': 0.06
+					}
+				});
 				m.addLayer({
 					id: 'boundary-line',
 					source: 'boundary',
 					type: 'line',
 					paint: {
-						'line-color': '#ffffff',
-						'line-width': 2,
-						'line-dasharray': [2, 2],
-						'line-opacity': 0.85
+						'line-color': '#ff8a1c',
+						'line-width': 2.5,
+						'line-opacity': 0.95
 					}
 				});
 
@@ -482,32 +500,20 @@
 					}
 				});
 
-				m.addLayer({
-					id: 'wall-segment-labels-text',
-					source: 'wall-segment-labels',
-					type: 'symbol',
-					layout: {
-						'text-field': ['get', 'label'],
-						'text-size': 12,
-						'text-font': ['Open Sans Regular'],
-						'text-allow-overlap': true,
-						'text-ignore-placement': true,
-						'symbol-placement': 'point'
-					},
-					paint: {
-						'text-color': '#0b0b0c',
-						'text-halo-color': '#ffe7c8',
-						'text-halo-width': 1.5
-					}
-				});
+				// Wall segment labels are now rendered as HTML Markers for the pill look —
+				// see syncSourcesAndMarkers. We keep the empty source around so older
+				// references / future features that want a symbol layer can hook in.
 
 				m.on('click', onMapClick);
 				m.on('mousemove', onMapMouseMove);
 				m.on('mouseleave', () => clearHover());
+				m.on('move', updateActiveEndPos);
+				m.on('moveend', updateActiveEndPos);
 
 				mapInstance = m;
 				mapStatus = 'ready';
 				syncSourcesAndMarkers();
+				updateActiveEndPos();
 			});
 		})();
 
@@ -519,6 +525,7 @@
 
 	function tearDown() {
 		clearVertexMarkers();
+		clearLabelMarkers();
 		mapInstance?.remove();
 		mapInstance = null;
 		mapStatus = 'idle';
@@ -527,6 +534,29 @@
 	function clearVertexMarkers() {
 		for (const m of activeVertexMarkers) m.remove();
 		activeVertexMarkers = [];
+	}
+
+	function clearLabelMarkers() {
+		for (const m of labelMarkers) m.remove();
+		labelMarkers = [];
+	}
+
+	type LabelKind = 'wall-active' | 'wall-other' | 'boundary';
+
+	function addLabelMarker(opts: {
+		map: MLMap;
+		Marker: typeof import('maplibre-gl').Marker;
+		lngLat: LngLat;
+		text: string;
+		kind: LabelKind;
+	}) {
+		const el = document.createElement('div');
+		el.className = `edge-label edge-label--${opts.kind}`;
+		el.textContent = opts.text;
+		const marker = new opts.Marker({ element: el, anchor: 'center' })
+			.setLngLat(opts.lngLat)
+			.addTo(opts.map);
+		labelMarkers.push(marker);
 	}
 
 	function onMapClick(e: MapMouseEvent) {
@@ -610,8 +640,47 @@
 	$effect(() => {
 		mapVersion;
 		if (!browser || !mapInstance || mapStatus !== 'ready') return;
-		untrack(() => syncSourcesAndMarkers());
+		untrack(() => {
+			syncSourcesAndMarkers();
+			updateActiveEndPos();
+		});
 	});
+
+	function updateActiveEndPos() {
+		if (!mapInstance || activeSegIdx === null) {
+			activeEndScreenPos = null;
+			return;
+		}
+		const seg = activeSegment();
+		if (seg.length < 2) {
+			activeEndScreenPos = null;
+			return;
+		}
+		const last = seg[seg.length - 1];
+		const projected = mapInstance.project({ lng: last[0], lat: last[1] });
+		activeEndScreenPos = { x: projected.x, y: projected.y };
+	}
+
+	function applyLastSegLen() {
+		const target = parseFloat(lastSegInput);
+		if (!Number.isFinite(target) || target <= 0) return;
+		const segs = segments();
+		if (activeSegIdx === null) return;
+		const seg = segs[activeSegIdx];
+		if (seg.length < 2) return;
+		const prev = seg[seg.length - 2];
+		const cur = seg[seg.length - 1];
+		const local = lngLatToLocal(cur, prev);
+		const currentLen = Math.hypot(local.x, local.y);
+		if (currentLen < 1e-6) return;
+		const scale = target / currentLen;
+		const newPoint = localToLngLat({ x: local.x * scale, y: local.y * scale }, prev);
+		const updated = segs.slice();
+		updated[activeSegIdx] = [...seg.slice(0, -1), newPoint];
+		setSegments(updated);
+		scheduleSave();
+		lastSegInput = '';
+	}
 
 	$effect(() => {
 		const t = tool;
@@ -677,34 +746,36 @@
 			features: offsetFeatures
 		});
 
-		// Length labels — midpoint of every edge across active + other walls.
-		const labelFeatures: GeoJSON.Feature[] = [];
-		const pushLabels = (segs: LngLat[][]) => {
-			for (const seg of segs) {
-				for (let i = 0; i < seg.length - 1; i++) {
-					const a = seg[i];
-					const b = seg[i + 1];
-					const len = haversineMeters(a, b);
-					const mid: LngLat = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
-					labelFeatures.push({
-						type: 'Feature',
-						properties: { label: `${len.toFixed(1)} m` },
-						geometry: { type: 'Point', coordinates: mid }
-					});
+		// Length labels — rendered as HTML markers so we get pill styling.
+		clearLabelMarkers();
+		if (mlCtors) {
+			const { Marker } = mlCtors;
+			const pushSegmentLabels = (segs: LngLat[][], kind: LabelKind) => {
+				for (const seg of segs) {
+					for (let i = 0; i < seg.length - 1; i++) {
+						const a = seg[i];
+						const b = seg[i + 1];
+						const len = haversineMeters(a, b);
+						if (len < 0.05) continue; // skip near-zero spurs
+						const mid: LngLat = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+						addLabelMarker({
+							map: m,
+							Marker,
+							lngLat: mid,
+							text: `${len.toFixed(2)} m`,
+							kind
+						});
+					}
 				}
+			};
+			pushSegmentLabels(aSegments, 'wall-active');
+			for (const w of data.walls) {
+				if (w.id === aId) continue;
+				pushSegmentLabels(pathToSegments(w.pathGeoJson ?? null), 'wall-other');
 			}
-		};
-		pushLabels(aSegments);
-		for (const w of data.walls) {
-			if (w.id === aId) continue;
-			pushLabels(pathToSegments(w.pathGeoJson ?? null));
 		}
-		(m.getSource('wall-segment-labels') as GeoJSONSource).setData({
-			type: 'FeatureCollection',
-			features: labelFeatures
-		});
 
-		// Property boundary
+		// Property boundary fill + outline + per-edge labels.
 		const boundary = data.site.propertyBoundaryGeoJson;
 		(m.getSource('boundary') as GeoJSONSource).setData(
 			boundary
@@ -715,6 +786,24 @@
 					}
 				: { type: 'FeatureCollection', features: [] }
 		);
+		// Boundary edge labels — one per edge of the outer ring.
+		if (mlCtors && boundary && boundary.coordinates[0]) {
+			const ring = boundary.coordinates[0];
+			for (let i = 0; i < ring.length - 1; i++) {
+				const a = ring[i] as LngLat;
+				const b = ring[i + 1] as LngLat;
+				const len = haversineMeters(a, b);
+				if (len < 0.5) continue; // skip the tiny closing spur duplicates
+				const mid: LngLat = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+				addLabelMarker({
+					map: m,
+					Marker: mlCtors.Marker,
+					lngLat: mid,
+					text: `${len.toFixed(2)} m`,
+					kind: 'boundary'
+				});
+			}
+		}
 
 		// Vertex markers — every vertex of every sub-segment of the active wall.
 		clearVertexMarkers();
@@ -869,6 +958,13 @@
 
 	const activeSegLen = $derived(() => activeSegment().length);
 	const activeWallSegmentCount = $derived(() => segments().length);
+
+	const lastSegmentLengthM = $derived(() => {
+		if (activeSegIdx === null) return 0;
+		const seg = activeSegment();
+		if (seg.length < 2) return 0;
+		return haversineMeters(seg[seg.length - 2], seg[seg.length - 1]);
+	});
 </script>
 
 <svelte:window onkeydown={onKey} />
@@ -976,6 +1072,34 @@
 				{#if snapHintLabel}<strong class="snap-tag">snap {snapHintLabel}</strong>{/if}
 			{/if}
 		</div>
+
+		{#if tool === 'draw' && activeSegIdx !== null && activeSegLen() >= 2 && activeEndScreenPos}
+			<div
+				class="set-length-popover"
+				style="transform: translate({activeEndScreenPos.x + 18}px, {activeEndScreenPos.y - 28}px)"
+			>
+				<div class="set-length-current">
+					Current: <strong>{lastSegmentLengthM().toFixed(2)} m</strong>
+				</div>
+				<form
+					class="set-length-form"
+					onsubmit={(e) => {
+						e.preventDefault();
+						applyLastSegLen();
+					}}
+				>
+					<input
+						type="number"
+						step="0.01"
+						min="0.1"
+						placeholder="set m"
+						bind:value={lastSegInput}
+						aria-label="Set last segment length in metres"
+					/>
+					<button type="submit" class="btn primary" disabled={!lastSegInput}>Set</button>
+				</form>
+			</div>
+		{/if}
 	</div>
 
 	<footer class="summary">
@@ -1147,6 +1271,52 @@
 		margin-left: 0.4rem;
 	}
 
+	.set-length-popover {
+		position: absolute;
+		top: 0;
+		left: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.3rem;
+		padding: 0.5rem 0.625rem;
+		background: rgba(11, 11, 12, 0.94);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		box-shadow: 0 6px 16px rgba(0, 0, 0, 0.55);
+		z-index: 3;
+		font-size: 0.8rem;
+		min-width: 12rem;
+	}
+	.set-length-current {
+		color: var(--text-muted);
+	}
+	.set-length-current strong {
+		color: var(--text);
+		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	}
+	.set-length-form {
+		display: flex;
+		gap: 0.4rem;
+	}
+	.set-length-form input {
+		flex: 1;
+		min-width: 0;
+		background: var(--surface);
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		padding: 0.35rem 0.55rem;
+		color: var(--text);
+		font-size: 0.85rem;
+		outline: none;
+	}
+	.set-length-form input:focus {
+		border-color: var(--accent);
+	}
+	.set-length-form .btn {
+		padding: 0.35rem 0.7rem;
+		font-size: 0.8rem;
+	}
+
 	.tools {
 		position: absolute;
 		top: 0.6rem;
@@ -1193,6 +1363,34 @@
 	.tool-label {
 		font-size: 0.55rem;
 		line-height: 1;
+	}
+
+	/* Pill-style edge labels rendered via MapLibre Markers. */
+	:global(.edge-label) {
+		font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+		font-size: 11px;
+		font-weight: 600;
+		font-variant-numeric: tabular-nums;
+		padding: 3px 7px;
+		border-radius: 999px;
+		white-space: nowrap;
+		pointer-events: none;
+		user-select: none;
+		box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+		letter-spacing: 0.01em;
+	}
+	:global(.edge-label--wall-active) {
+		background: #ff8a1c;
+		color: #1a0f00;
+	}
+	:global(.edge-label--wall-other) {
+		background: rgba(255, 138, 28, 0.5);
+		color: #1a0f00;
+	}
+	:global(.edge-label--boundary) {
+		background: rgba(11, 11, 12, 0.85);
+		color: #ffffff;
+		border: 1px solid rgba(255, 138, 28, 0.7);
 	}
 
 	:global(.vertex-handle) {
