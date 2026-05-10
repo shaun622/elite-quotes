@@ -42,7 +42,13 @@ const SiteSchema = z.object({
 		.enum(['QLD', 'NSW', 'VIC', 'SA', 'WA', 'TAS', 'ACT', 'NT'])
 		.nullable()
 		.default(null),
-	postcode: z.union([z.string().regex(/^\d{4}$/), z.literal('')]).default('')
+	postcode: z.union([z.string().regex(/^\d{4}$/), z.literal('')]).default(''),
+	/** Reference frame for RGL/NGL values shown in Step 3 and downstream PDFs.
+	 *  - 'site': arbitrary site benchmark, all heights relative to it (default)
+	 *  - 'ahd': Australian Height Datum — heights are absolute AHD elevations
+	 *  - 'relative': no datum, heights are just numbers
+	 */
+	verticalDatum: z.enum(['site', 'ahd', 'relative']).default('site')
 });
 
 const PostSchema = z.object({

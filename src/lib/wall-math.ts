@@ -214,6 +214,30 @@ export function nearestSegment(
 }
 
 /**
+ * Anchor point for a "300 mm" style offset distance label, sitting half-way
+ * between a wall segment and its parallel offset line. Caller chooses which
+ * side of the segment the offset is on (positive = left of travel).
+ */
+export function perpendicularLabelAnchor(opts: {
+	a: LngLat;
+	b: LngLat;
+	offsetMeters: number;
+}): LngLat {
+	const origin = opts.a;
+	const la = { x: 0, y: 0 };
+	const lb = lngLatToLocal(opts.b, origin);
+	const midLocal = { x: (la.x + lb.x) / 2, y: (la.y + lb.y) / 2 };
+	const dx = lb.x - la.x;
+	const dy = lb.y - la.y;
+	const len = Math.hypot(dx, dy) || 1;
+	// Left-hand normal — same convention as offsetPolyline.
+	const nx = -dy / len;
+	const ny = dx / len;
+	const half = opts.offsetMeters / 2;
+	return localToLngLat({ x: midLocal.x + nx * half, y: midLocal.y + ny * half }, origin);
+}
+
+/**
  * Generate post indices for a wall of total length L (metres) at the given
  * post spacing (mm). Returns the post-distance-along-wall in metres for
  * each post — index 0 at the start, last index at the end.

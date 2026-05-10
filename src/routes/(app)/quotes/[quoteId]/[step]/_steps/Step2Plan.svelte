@@ -16,6 +16,7 @@
 		multiPolylineLengthMeters,
 		offsetPolyline,
 		pathToSegments,
+		perpendicularLabelAnchor,
 		polylineLengthMeters,
 		segmentsToPath,
 		snapAngle,
@@ -541,7 +542,7 @@
 		labelMarkers = [];
 	}
 
-	type LabelKind = 'wall-active' | 'wall-other' | 'boundary';
+	type LabelKind = 'wall-active' | 'wall-other' | 'boundary' | 'offset';
 
 	function addLabelMarker(opts: {
 		map: MLMap;
@@ -805,6 +806,48 @@
 			}
 		}
 
+		// Offset distance label — one per wall, anchored half-way between the
+		// wall's longest sub-segment and its offset line. Skipped when the wall
+		// has no segments long enough to read a label against.
+		if (mlCtors && aWall) {
+			let longestSeg: LngLat[] | null = null;
+			let longestLen = 0;
+			for (const seg of aSegments) {
+				if (seg.length < 2) continue;
+				const segLen = polylineLengthMeters(seg);
+				if (segLen > longestLen) {
+					longestLen = segLen;
+					longestSeg = seg;
+				}
+			}
+			if (longestSeg && longestLen >= 1) {
+				// Use the longest individual edge inside that sub-segment for the anchor.
+				let bestA: LngLat = longestSeg[0];
+				let bestB: LngLat = longestSeg[1];
+				let bestEdgeLen = haversineMeters(bestA, bestB);
+				for (let i = 1; i < longestSeg.length - 1; i++) {
+					const len = haversineMeters(longestSeg[i], longestSeg[i + 1]);
+					if (len > bestEdgeLen) {
+						bestEdgeLen = len;
+						bestA = longestSeg[i];
+						bestB = longestSeg[i + 1];
+					}
+				}
+				const anchor = perpendicularLabelAnchor({
+					a: bestA,
+					b: bestB,
+					offsetMeters: offsetMm / 1000
+				});
+				addLabelMarker({
+					map: m,
+					Marker: mlCtors.Marker,
+					lngLat: anchor,
+					text: `${offsetMm} mm`,
+					kind: 'offset'
+				});
+			}
+		}
+
 		// Vertex markers — every vertex of every sub-segment of the active wall.
 		clearVertexMarkers();
 		if (mlCtors && aWall) {
@@ -965,6 +1008,36 @@
 		if (seg.length < 2) return 0;
 		return haversineMeters(seg[seg.length - 2], seg[seg.length - 1]);
 	});
+
+	// --- per-wall settings panel ------------------------------------------
+	let settingsOpen = $state(false);
+
+	function setBoundaryOffset(value: number) {
+		const w = activeWall();
+		if (!w) return;
+		const clamped = Math.max(250, Math.min(1000, Math.round(value)));
+		if (w.defaults.boundaryOffsetMm === clamped) return;
+		w.defaults.boundaryOffsetMm = clamped;
+		mapVersion++;
+		scheduleSave();
+	}
+
+	function setPostSpacing(value: number) {
+		const w = activeWall();
+		if (!w) return;
+		const clamped = Math.max(1500, Math.min(3000, Math.round(value)));
+		if (w.defaults.postSpacingMm === clamped) return;
+		w.defaults.postSpacingMm = clamped;
+		scheduleSave();
+	}
+
+	function setConcreteStrength(value: 'N25' | 'N32') {
+		const w = activeWall();
+		if (!w) return;
+		if (w.defaults.concreteStrength === value) return;
+		w.defaults.concreteStrength = value;
+		scheduleSave();
+	}
 </script>
 
 <svelte:window onkeydown={onKey} />
@@ -992,6 +1065,17 @@
 			<button
 				type="button"
 				class="btn ghost"
+				class:on={settingsOpen}
+				onclick={() => (settingsOpen = !settingsOpen)}
+				disabled={!activeWall()}
+				title="Wall settings"
+				aria-expanded={settingsOpen}
+			>
+				⚙ Wall settings
+			</button>
+			<button
+				type="button"
+				class="btn ghost"
 				onclick={undoLastPoint}
 				disabled={activeSegIdx === null || activeSegLen() === 0}
 				title="Undo last point (Ctrl+Z)"
@@ -1016,6 +1100,59 @@
 			</button>
 		</div>
 	</header>
+
+	{#if settingsOpen && activeWall()}
+		{@const w = activeWall()!}
+		<section class="wall-settings" aria-label="Settings for {w.name}">
+			<header>
+				<strong>{w.name} settings</strong>
+				<span class="muted">Applies to this wall only · changes save automatically</span>
+			</header>
+			<div class="settings-grid">
+				<label>
+					<span>Boundary offset</span>
+					<div class="input-with-unit">
+						<input
+							type="number"
+							min="250"
+							max="1000"
+							step="10"
+							value={w.defaults.boundaryOffsetMm}
+							oninput={(e) => setBoundaryOffset(parseInt((e.currentTarget as HTMLInputElement).value, 10) || 0)}
+						/>
+						<span class="unit">mm</span>
+					</div>
+					<small class="muted">Min 250 mm (AS 4678). Walls snap to offset line.</small>
+				</label>
+				<label>
+					<span>Post spacing</span>
+					<div class="input-with-unit">
+						<input
+							type="number"
+							min="1500"
+							max="3000"
+							step="100"
+							value={w.defaults.postSpacingMm}
+							oninput={(e) => setPostSpacing(parseInt((e.currentTarget as HTMLInputElement).value, 10) || 0)}
+						/>
+						<span class="unit">mm c/c</span>
+					</div>
+					<small class="muted">Drives Step 3 post count. Tighter for tall walls.</small>
+				</label>
+				<label>
+					<span>Concrete strength</span>
+					<select
+						value={w.defaults.concreteStrength}
+						onchange={(e) => setConcreteStrength((e.currentTarget as HTMLSelectElement).value as 'N25' | 'N32')}
+					>
+						<option value="N25">N25</option>
+						<option value="N32">N32</option>
+					</select>
+					<small class="muted">For pier footings. N32 for taller walls.</small>
+				</label>
+			</div>
+		</section>
+	{/if}
 
 	<div class="map-frame">
 		<div class="map" bind:this={mapContainer}></div>
@@ -1226,6 +1363,75 @@
 	.btn.danger:hover:not(:disabled) {
 		background: rgba(255, 85, 102, 0.1);
 	}
+	.btn.on {
+		background: rgba(255, 138, 28, 0.15);
+		border-color: var(--accent);
+		color: var(--accent);
+	}
+
+	.wall-settings {
+		background: var(--surface);
+		border: 1px solid var(--border);
+		border-radius: 12px;
+		padding: 0.875rem 1rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.625rem;
+	}
+	.wall-settings header {
+		display: flex;
+		align-items: baseline;
+		gap: 0.6rem;
+		justify-content: space-between;
+		flex-wrap: wrap;
+	}
+	.wall-settings header strong {
+		font-size: 0.95rem;
+	}
+	.settings-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+		gap: 0.75rem 1rem;
+	}
+	.settings-grid label {
+		display: flex;
+		flex-direction: column;
+		gap: 0.3rem;
+		font-size: 0.78rem;
+		color: var(--text-muted);
+	}
+	.settings-grid input,
+	.settings-grid select {
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		padding: 0.4rem 0.55rem;
+		color: var(--text);
+		font-size: 0.9rem;
+		outline: none;
+	}
+	.settings-grid input:focus,
+	.settings-grid select:focus {
+		border-color: var(--accent);
+	}
+	.input-with-unit {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+	}
+	.input-with-unit input {
+		flex: 1;
+		min-width: 0;
+	}
+	.unit {
+		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+		color: var(--text-muted);
+		font-size: 0.78rem;
+	}
+	.settings-grid small {
+		font-size: 0.7rem;
+		line-height: 1.2;
+	}
 
 	.map-frame {
 		position: relative;
@@ -1391,6 +1597,13 @@
 		background: rgba(11, 11, 12, 0.85);
 		color: #ffffff;
 		border: 1px solid rgba(255, 138, 28, 0.7);
+	}
+	:global(.edge-label--offset) {
+		background: rgba(11, 11, 12, 0.92);
+		color: #d8f0bf;
+		border: 1px solid rgba(168, 224, 179, 0.7);
+		font-size: 10px;
+		padding: 2px 6px;
 	}
 
 	:global(.vertex-handle) {

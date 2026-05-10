@@ -12,6 +12,7 @@
 		recommendedPierDiameterMm,
 		snapToPanelModule
 	} from '$lib/engineering';
+	import { findLinkForPost } from '$lib/wall-links';
 
 	type SaveState = 'idle' | 'saving' | 'saved' | 'conflict' | 'error';
 
@@ -343,6 +344,43 @@
 		data.meta.flags.surchargeLoad = !data.meta.flags.surchargeLoad;
 		scheduleSave();
 	}
+
+	function setVerticalDatum(value: 'site' | 'ahd' | 'relative') {
+		if (data.site.verticalDatum === value) return;
+		data.site.verticalDatum = value;
+		scheduleSave();
+	}
+
+	const datumLabel = $derived(() => {
+		switch (data.site.verticalDatum) {
+			case 'ahd':
+				return 'AHD';
+			case 'relative':
+				return 'Relative';
+			default:
+				return 'Site Benchmark';
+		}
+	});
+
+	// --- linked-NGL detection ----------------------------------------------
+	function linkForPost(wallId: string, postIdx: number) {
+		return findLinkForPost({ walls: data.walls, wallId, postIdx });
+	}
+
+	function matchNeighbourNgl(wallId: string, postIdx: number) {
+		const link = linkForPost(wallId, postIdx);
+		if (!link) return;
+		const otherWall = data.walls.find((w) => w.id === link.wallId);
+		if (!otherWall) return;
+		const otherPost = otherWall.posts[link.postIdx];
+		if (!otherPost) return;
+		const thisWall = data.walls.find((w) => w.id === wallId);
+		if (!thisWall) return;
+		const thisPost = thisWall.posts[postIdx];
+		if (!thisPost) return;
+		thisPost.nglMm = otherPost.nglMm;
+		scheduleSave();
+	}
 </script>
 
 <div class="step3">
@@ -363,17 +401,32 @@
 			{/each}
 		</div>
 
-		{#if activeWall()}
-			<div class="cert" class:required={certCheck().required}>
-				{#if certCheck().required}
-					<strong>⚠ Engineer cert required</strong>
-					<span>{certCheck().reason}</span>
-				{:else}
-					<strong>✓ Within non-engineered limits</strong>
-					<span>Max retained {maxRetained()} mm</span>
-				{/if}
-			</div>
-		{/if}
+		<div class="topbar-right">
+			<label class="datum-select">
+				<span class="datum-label">Vertical datum</span>
+				<select
+					value={data.site.verticalDatum}
+					onchange={(e) =>
+						setVerticalDatum((e.currentTarget as HTMLSelectElement).value as 'site' | 'ahd' | 'relative')}
+				>
+					<option value="site">Site Benchmark</option>
+					<option value="ahd">AHD (Australian Height Datum)</option>
+					<option value="relative">Relative (no datum)</option>
+				</select>
+			</label>
+
+			{#if activeWall()}
+				<div class="cert" class:required={certCheck().required}>
+					{#if certCheck().required}
+						<strong>⚠ Engineer cert required</strong>
+						<span>{certCheck().reason}</span>
+					{:else}
+						<strong>✓ Within non-engineered limits</strong>
+						<span>Max retained {maxRetained()} mm · datum: {datumLabel()}</span>
+					{/if}
+				</div>
+			{/if}
+		</div>
 	</header>
 
 	{#if !activeWall() || activeLengthM() < 0.5}
@@ -580,6 +633,7 @@
 						{@const w = activeWall()!}
 						{#each w.posts as post, i (i)}
 							{@const retained = Math.max(0, post.rglMm - post.nglMm)}
+							{@const link = linkForPost(w.id, i)}
 							<li>
 								<button
 									type="button"
@@ -592,6 +646,16 @@
 										Ø{pierFor(retained)} · {embedFor(retained)} embed
 									</span>
 								</button>
+								{#if link}
+									<button
+										type="button"
+										class="link-pill"
+										title="NGL: {w.posts[i].nglMm} mm · neighbour: {data.walls.find((wl) => wl.id === link.wallId)?.posts[link.postIdx]?.nglMm ?? 0} mm. Click to copy from neighbour."
+										onclick={() => matchNeighbourNgl(w.id, i)}
+									>
+										↔ {link.wallName} {link.end === 'start' ? 'Start' : 'End'}
+									</button>
+								{/if}
 							</li>
 						{/each}
 					{/if}
@@ -672,6 +736,39 @@
 	.tab .tab-len {
 		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 		font-size: 0.7rem;
+	}
+
+	.topbar-right {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-end;
+		gap: 0.5rem;
+		max-width: 28rem;
+	}
+	.datum-select {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		font-size: 0.8rem;
+		color: var(--text-muted);
+	}
+	.datum-label {
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		font-size: 0.7rem;
+		font-weight: 600;
+	}
+	.datum-select select {
+		background: var(--surface);
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		padding: 0.35rem 0.5rem;
+		color: var(--text);
+		font-size: 0.85rem;
+		outline: none;
+	}
+	.datum-select select:focus {
+		border-color: var(--accent);
 	}
 
 	.cert {
@@ -887,6 +984,11 @@
 		padding: 0.25rem;
 		background: var(--surface);
 	}
+	.post-list li {
+		display: flex;
+		flex-direction: column;
+		gap: 0.15rem;
+	}
 	.post-list li button {
 		display: grid;
 		grid-template-columns: 2.5rem 1fr auto;
@@ -901,6 +1003,24 @@
 		border-radius: 6px;
 		cursor: pointer;
 		font-size: 0.85rem;
+	}
+	.link-pill {
+		align-self: flex-start;
+		margin-left: 3rem;
+		margin-bottom: 0.25rem;
+		background: rgba(168, 224, 179, 0.15);
+		border: 1px solid rgba(168, 224, 179, 0.5);
+		color: #a8e0b3;
+		padding: 0.15rem 0.5rem;
+		border-radius: 999px;
+		font-size: 0.7rem;
+		font-weight: 600;
+		cursor: pointer;
+		text-align: left;
+	}
+	.link-pill:hover {
+		background: rgba(168, 224, 179, 0.25);
+		color: #d8f0bf;
 	}
 	.post-list li button:hover {
 		background: rgba(255, 255, 255, 0.04);
