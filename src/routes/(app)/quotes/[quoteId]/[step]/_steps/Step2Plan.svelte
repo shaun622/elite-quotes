@@ -104,6 +104,7 @@
 
 	// --- wall management ---------------------------------------------------
 	type Mode = 'drawing' | 'editing';
+	type Tool = 'pan' | 'draw';
 	// svelte-ignore state_referenced_locally
 	let activeWallId = $state<string | null>(initialData.walls[0]?.id ?? null);
 	// svelte-ignore state_referenced_locally
@@ -112,6 +113,16 @@
 			(initialData.walls[0]?.pathGeoJson?.coordinates.length ?? 0) < 2
 			? 'drawing'
 			: 'editing'
+	);
+	// Top-level interaction tool. Pan = clicks do nothing, you just navigate.
+	// Draw = clicks add points / insert vertices. Auto-selected based on wall
+	// state on load and on every wall transition (start/finish/add).
+	// svelte-ignore state_referenced_locally
+	let tool = $state<Tool>(
+		initialData.walls.length === 0 ||
+			(initialData.walls[0]?.pathGeoJson?.coordinates.length ?? 0) < 2
+			? 'draw'
+			: 'pan'
 	);
 	let mapVersion = $state(0);
 
@@ -166,6 +177,7 @@
 		activeWallId = id;
 		const c = data.walls.find((w) => w.id === id)?.pathGeoJson?.coordinates ?? [];
 		mode = c.length < 2 ? 'drawing' : 'editing';
+		tool = mode === 'drawing' ? 'draw' : 'pan';
 		mapVersion++;
 	}
 
@@ -174,6 +186,7 @@
 		data.walls.push(next);
 		activeWallId = next.id;
 		mode = 'drawing';
+		tool = 'draw';
 		mapVersion++;
 		scheduleSave();
 	}
@@ -205,11 +218,13 @@
 	function finishWall() {
 		if (activeCoords().length < 2) return;
 		mode = 'editing';
+		tool = 'pan';
 		mapVersion++;
 	}
 
 	function resumeDrawing() {
 		mode = 'drawing';
+		tool = 'draw';
 		mapVersion++;
 	}
 
@@ -239,6 +254,9 @@
 
 	// --- click logic -------------------------------------------------------
 	function handleMapClick(lngLat: LngLat) {
+		// Pan tool: clicks ignored. Drag still pans the map natively.
+		if (tool === 'pan') return;
+
 		const w = activeWall();
 		if (!w) return;
 		const coords = activeCoords();
@@ -496,6 +514,12 @@
 
 	function onMapMouseMove(e: MapMouseEvent) {
 		if (!mapInstance) return;
+		// In pan tool, no ghost line / snap hint — keeps the map "quiet" while
+		// the user is just navigating.
+		if (tool === 'pan') {
+			clearHover();
+			return;
+		}
 		const ll: LngLat = [e.lngLat.lng, e.lngLat.lat];
 		const coords = activeCoords();
 
@@ -576,6 +600,14 @@
 		mapVersion;
 		if (!browser || !mapInstance || mapStatus !== 'ready') return;
 		untrack(() => syncSourcesAndMarkers());
+	});
+
+	// --- effect: cursor reflects the active tool ---------------------------
+	$effect(() => {
+		const t = tool;
+		if (!browser || !mapInstance || mapStatus !== 'ready') return;
+		mapInstance.getCanvas().style.cursor = t === 'draw' ? 'crosshair' : '';
+		if (t === 'pan') untrack(() => clearHover());
 	});
 
 	function syncSourcesAndMarkers() {
@@ -701,7 +733,11 @@
 		// Only handle when the map area is focused-ish (not while typing in the textarea)
 		const tag = (e.target as HTMLElement | null)?.tagName?.toLowerCase();
 		if (tag === 'input' || tag === 'textarea') return;
-		if (e.key === 'Escape') {
+		if (e.key === 'v' || e.key === 'V') {
+			tool = 'pan';
+		} else if (e.key === 'd' || e.key === 'D') {
+			tool = 'draw';
+		} else if (e.key === 'Escape') {
 			if (mode === 'drawing' && activeCoords().length === 0) return;
 			if (mode === 'drawing') {
 				// Cancel current draw — discard active wall points
@@ -862,8 +898,45 @@
 		{#if mapStatus !== 'ready'}
 			<div class="map-loading">Loading satellite…</div>
 		{/if}
+
+		<!-- Tool palette: Pan vs Draw. Stays clear of MapLibre's top-right nav controls. -->
+		<div class="tools" role="toolbar" aria-label="Map tool">
+			<button
+				type="button"
+				class="tool-btn"
+				class:active={tool === 'pan'}
+				aria-pressed={tool === 'pan'}
+				title="Pan / navigate (V)"
+				onclick={() => (tool = 'pan')}
+			>
+				<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+					<path d="M18 11V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v0" />
+					<path d="M14 10V4a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v2" />
+					<path d="M10 10.5V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v8" />
+					<path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15" />
+				</svg>
+				<span class="tool-label">Pan</span>
+			</button>
+			<button
+				type="button"
+				class="tool-btn"
+				class:active={tool === 'draw'}
+				aria-pressed={tool === 'draw'}
+				title="Draw wall points (D)"
+				onclick={() => (tool = 'draw')}
+			>
+				<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+					<path d="M12 21s-7-4.5-7-11a7 7 0 1 1 14 0c0 6.5-7 11-7 11z" />
+					<circle cx="12" cy="10" r="2.5" />
+				</svg>
+				<span class="tool-label">Draw</span>
+			</button>
+		</div>
+
 		<div class="map-hint">
-			{#if mode === 'drawing'}
+			{#if tool === 'pan'}
+				Pan tool — drag to navigate, scroll/pinch to zoom. Switch to Draw to add points.
+			{:else if mode === 'drawing'}
 				{#if activeCoords().length === 0}
 					Tap the map to drop the first wall point.
 				{:else if activeCoords().length === 1}
@@ -873,8 +946,7 @@
 					{#if snapHintLabel}<strong class="snap-tag">snap {snapHintLabel}</strong>{/if}
 				{/if}
 			{:else}
-				Drag a vertex to fine-tune. Tap on the line between vertices to insert one.
-				Double-click a vertex to remove it.
+				Tap on the line between vertices to insert one. Drag any vertex to fine-tune. Double-click a vertex to remove it.
 			{/if}
 		</div>
 	</div>
@@ -1038,6 +1110,55 @@
 		border-radius: 6px;
 		line-height: 1.35;
 		pointer-events: none;
+	}
+
+	/* Tool palette — top-left of the map, away from MapLibre's top-right nav */
+	.tools {
+		position: absolute;
+		top: 0.6rem;
+		left: 0.6rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.3rem;
+		background: rgba(11, 11, 12, 0.85);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		padding: 0.3rem;
+		z-index: 2;
+	}
+	.tool-btn {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 0.1rem;
+		width: 44px;
+		height: 44px;
+		background: transparent;
+		border: 1px solid transparent;
+		border-radius: 6px;
+		color: var(--text-muted);
+		cursor: pointer;
+		font-size: 0.6rem;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		font-weight: 600;
+		padding: 0.25rem 0;
+	}
+	.tool-btn:hover {
+		color: var(--text);
+		background: rgba(255, 255, 255, 0.06);
+	}
+	.tool-btn.active {
+		background: var(--accent);
+		color: var(--accent-fg);
+		border-color: var(--accent);
+	}
+	.tool-btn.active:hover {
+		background: var(--accent);
+	}
+	.tool-label {
+		font-size: 0.55rem;
+		line-height: 1;
 	}
 	.snap-tag {
 		display: inline-block;
