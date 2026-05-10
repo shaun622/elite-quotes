@@ -48,6 +48,11 @@
 
 	// --- save protocol ------------------------------------------------------
 	let saveTimer: ReturnType<typeof setTimeout> | null = null;
+	// Serialised save chain — each save waits for the prior to update dataHash
+	// before sending. Without this, two rapid edits can both fire with a stale
+	// If-Match header; the second one 409s, the conflict handler then rolls
+	// back local state to the server's pre-second-edit view.
+	let saveChain: Promise<void> = Promise.resolve();
 
 	type FreshResponse = { data: QuoteData; dataHash: string; versionNumber: number };
 	type SaveResponse = { dataHash: string; versionNumber: number };
@@ -55,10 +60,17 @@
 	function scheduleSave() {
 		if (saveTimer) clearTimeout(saveTimer);
 		saveState = 'saving';
-		saveTimer = setTimeout(save, 600);
+		saveTimer = setTimeout(() => {
+			void save();
+		}, 600);
 	}
 
-	async function save() {
+	function save(): Promise<void> {
+		saveChain = saveChain.then(doSave, doSave);
+		return saveChain;
+	}
+
+	async function doSave() {
 		const idemKey = crypto.randomUUID();
 		try {
 			const res = await fetch(`/api/quotes/${quoteId}.json`, {
