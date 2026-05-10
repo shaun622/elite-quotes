@@ -3,6 +3,7 @@
 	import { STEPS } from '$lib/wizard';
 	import Step1Client from './_steps/Step1Client.svelte';
 	import Step2Plan from './_steps/Step2Plan.svelte';
+	import Step3Elevation from './_steps/Step3Elevation.svelte';
 	import StepPlaceholder from './_steps/StepPlaceholder.svelte';
 	import type { PageData } from './$types';
 
@@ -31,9 +32,11 @@
 			mapboxToken={data.mapboxToken}
 		/>
 	{:else if data.step === 3}
-		<StepPlaceholder
-			title="Elevation — set retained heights"
-			body="Per-post Retained Ground Level (RGL) and Natural Ground Level (NGL) editor lands in PR3. Drag post handles to set heights; snaps to the 200 mm panel module. Walls flagged for engineer cert when over postcode-aware thresholds (QLD 1000 mm, NSW 600 mm) or with a surcharge load."
+		<Step3Elevation
+			quoteId={data.quoteId}
+			data={data.data}
+			dataHash={data.dataHash}
+			versionNumber={data.versionNumber}
 		/>
 	{:else if data.step === 4}
 		<StepPlaceholder

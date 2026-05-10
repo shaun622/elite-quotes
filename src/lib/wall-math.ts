@@ -213,6 +213,31 @@ export function nearestSegment(
 	return { index: bestIdx, distanceM: bestDist };
 }
 
+/**
+ * Generate post indices for a wall of total length L (metres) at the given
+ * post spacing (mm). Returns the post-distance-along-wall in metres for
+ * each post — index 0 at the start, last index at the end.
+ *
+ * Number of posts = ceil(L / spacing) + 1, but always at least 2.
+ * Spacing is adjusted so endpoints are exact: actualSpacing = L / (n - 1).
+ */
+export function generatePostDistances(opts: {
+	wallLengthMeters: number;
+	spacingMm: number;
+}): number[] {
+	const { wallLengthMeters, spacingMm } = opts;
+	if (wallLengthMeters <= 0) return [];
+	const targetSpacingM = spacingMm / 1000;
+	const numIntervals = Math.max(1, Math.ceil(wallLengthMeters / targetSpacingM));
+	const numPosts = numIntervals + 1;
+	const actualSpacing = wallLengthMeters / numIntervals;
+	const distances: number[] = [];
+	for (let i = 0; i < numPosts; i++) {
+		distances.push(i * actualSpacing);
+	}
+	return distances;
+}
+
 /** Index of nearest vertex within thresholdMeters, or -1 if none. */
 export function nearestVertex(
 	p: LngLat,
