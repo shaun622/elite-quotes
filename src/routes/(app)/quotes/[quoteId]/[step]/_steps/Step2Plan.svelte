@@ -353,6 +353,54 @@
 	/** Briefly highlight an edge after a successful Set Length action. */
 	let recentlySetEdge = $state<string | null>(null);
 
+	// --- map layer toggles -------------------------------------------------
+	function readToggle(key: string, def: boolean): boolean {
+		if (!browser) return def;
+		try {
+			const v = localStorage.getItem(key);
+			return v === null ? def : v === '1';
+		} catch {
+			return def;
+		}
+	}
+	// svelte-ignore state_referenced_locally
+	let showBoundary = $state(readToggle('eq.step2.showBoundary', true));
+	// svelte-ignore state_referenced_locally
+	let showLabels = $state(readToggle('eq.step2.showLabels', true));
+
+	$effect(() => {
+		const v = showBoundary;
+		if (!browser) return;
+		try {
+			localStorage.setItem('eq.step2.showBoundary', v ? '1' : '0');
+		} catch {
+			/* private mode or quota — fail silently */
+		}
+	});
+
+	$effect(() => {
+		const v = showLabels;
+		if (!browser) return;
+		try {
+			localStorage.setItem('eq.step2.showLabels', v ? '1' : '0');
+		} catch {
+			/* private mode or quota — fail silently */
+		}
+	});
+
+	// Apply boundary visibility via MapLibre layout properties (cheap, no relayout).
+	$effect(() => {
+		const v = showBoundary;
+		if (!browser || !mapInstance || mapStatus !== 'ready') return;
+		for (const id of ['boundary-line', 'boundary-fill']) {
+			try {
+				mapInstance.setLayoutProperty(id, 'visibility', v ? 'visible' : 'none');
+			} catch {
+				/* layer not ready yet */
+			}
+		}
+	});
+
 	const initialCenter: LngLat = (() => {
 		// svelte-ignore state_referenced_locally
 		for (const w of initialData.walls) {
@@ -1183,11 +1231,22 @@
 	{/if}
 
 	<div class="layout">
-	<div class="map-frame">
+	<div class="map-frame" class:hide-labels={!showLabels}>
 		<div class="map" bind:this={mapContainer}></div>
 		{#if mapStatus !== 'ready'}
 			<div class="map-loading">Loading satellite…</div>
 		{/if}
+
+		<div class="layer-toggles" role="group" aria-label="Map layers">
+			<label>
+				<input type="checkbox" bind:checked={showBoundary} />
+				<span>Boundary</span>
+			</label>
+			<label>
+				<input type="checkbox" bind:checked={showLabels} />
+				<span>Labels</span>
+			</label>
+		</div>
 
 		<div class="tools" role="toolbar" aria-label="Map tool">
 			<button
@@ -1686,6 +1745,37 @@
 		font-size: 0.72rem;
 	}
 
+	/* Layer-visibility toggles — sit just below the Pan/Draw tools palette. */
+	.layer-toggles {
+		position: absolute;
+		top: calc(0.6rem + 100px);
+		left: 0.6rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.2rem;
+		background: rgba(11, 11, 12, 0.85);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		padding: 0.3rem 0.5rem;
+		font-size: 0.75rem;
+		z-index: 2;
+	}
+	.layer-toggles label {
+		display: flex;
+		align-items: center;
+		gap: 0.35rem;
+		cursor: pointer;
+		user-select: none;
+		color: var(--text);
+		padding: 0.05rem 0;
+	}
+	.layer-toggles input[type='checkbox'] {
+		accent-color: var(--accent);
+		width: 14px;
+		height: 14px;
+		margin: 0;
+	}
+
 	.tools {
 		position: absolute;
 		top: 0.6rem;
@@ -1732,6 +1822,11 @@
 	.tool-label {
 		font-size: 0.55rem;
 		line-height: 1;
+	}
+
+	/* The Labels toggle removes every length pill in one go via this class. */
+	:global(.map-frame.hide-labels .edge-label) {
+		display: none !important;
 	}
 
 	/* Pill-style edge labels rendered via MapLibre Markers. */
