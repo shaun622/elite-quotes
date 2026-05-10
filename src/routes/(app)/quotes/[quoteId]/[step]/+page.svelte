@@ -19,6 +19,7 @@
 			data={data.data}
 			dataHash={data.dataHash}
 			versionNumber={data.versionNumber}
+			mapboxToken={data.mapboxToken}
 		/>
 	{:else if data.step === 2}
 		<StepPlaceholder

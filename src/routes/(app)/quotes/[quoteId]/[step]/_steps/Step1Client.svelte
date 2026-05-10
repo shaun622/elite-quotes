@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { QuoteData } from '$lib/schemas/quote';
+	import { staticMapUrl, type GeocodeSuggestion } from '$lib/mapbox';
 
 	type SaveState = 'idle' | 'saving' | 'saved' | 'conflict' | 'error';
 
@@ -7,12 +8,14 @@
 		quoteId,
 		data: initialData,
 		dataHash: initialHash,
-		versionNumber: initialVersion
+		versionNumber: initialVersion,
+		mapboxToken
 	}: {
 		quoteId: string;
 		data: QuoteData;
 		dataHash: string;
 		versionNumber: number;
+		mapboxToken: string;
 	} = $props();
 
 	// Initial values are snapshotted from props on mount. Step navigation
@@ -25,19 +28,31 @@
 	let versionNumber = $state(initialVersion);
 	let saveState: SaveState = $state('idle');
 	let errorMessage = $state('');
-	// svelte-ignore state_referenced_locally
-	let lastSavedHash = $state(initialHash);
 
+	// --- address autocomplete state -----------------------------------------
+	// svelte-ignore state_referenced_locally
+	let addressQuery = $state(initialData.site.address);
+	let suggestions: GeocodeSuggestion[] = $state([]);
+	let suggestionsOpen = $state(false);
+	let geocodeLoading = $state(false);
+	let geocodeError = $state('');
+	let geocodeTimer: ReturnType<typeof setTimeout> | null = null;
+	let highlightIndex = $state(-1);
+
+	// svelte-ignore state_referenced_locally
+	let hasGeocode = $state(initialData.site.geocode !== null);
+
+	// --- save protocol ------------------------------------------------------
 	let saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+	type FreshResponse = { data: QuoteData; dataHash: string; versionNumber: number };
+	type SaveResponse = { dataHash: string; versionNumber: number };
 
 	function scheduleSave() {
 		if (saveTimer) clearTimeout(saveTimer);
 		saveState = 'saving';
 		saveTimer = setTimeout(save, 600);
 	}
-
-	type FreshResponse = { data: QuoteData; dataHash: string; versionNumber: number };
-	type SaveResponse = { dataHash: string; versionNumber: number };
 
 	async function save() {
 		const idemKey = crypto.randomUUID();
@@ -55,14 +70,14 @@
 			if (res.status === 409) {
 				saveState = 'conflict';
 				errorMessage = 'This quote was edited in another window — reloading.';
-				// Last-write-wins-with-toast: refetch and replace.
 				const fresh = (await fetch(`/api/quotes/${quoteId}.json`).then((r) =>
 					r.json()
 				)) as FreshResponse;
 				data = fresh.data;
 				dataHash = fresh.dataHash;
 				versionNumber = fresh.versionNumber;
-				lastSavedHash = fresh.dataHash;
+				addressQuery = fresh.data.site.address;
+				hasGeocode = fresh.data.site.geocode !== null;
 				setTimeout(() => (saveState = 'idle'), 2500);
 				return;
 			}
@@ -75,7 +90,6 @@
 			const body = (await res.json()) as SaveResponse;
 			dataHash = body.dataHash;
 			versionNumber = body.versionNumber;
-			lastSavedHash = body.dataHash;
 			saveState = 'saved';
 			setTimeout(() => {
 				if (saveState === 'saved') saveState = 'idle';
@@ -91,6 +105,93 @@
 			clearTimeout(saveTimer);
 			saveTimer = null;
 		}
+		void save();
+	}
+
+	// --- geocoding ----------------------------------------------------------
+
+	function onAddressInput() {
+		if (geocodeTimer) clearTimeout(geocodeTimer);
+		geocodeError = '';
+		// User is typing → no longer "selected"
+		if (hasGeocode) {
+			data.site.geocode = null;
+			data.site.state = null;
+			data.site.postcode = '';
+			hasGeocode = false;
+		}
+		highlightIndex = -1;
+		const q = addressQuery.trim();
+		if (q.length < 3) {
+			suggestions = [];
+			suggestionsOpen = false;
+			return;
+		}
+		geocodeLoading = true;
+		suggestionsOpen = true;
+		geocodeTimer = setTimeout(runGeocode, 280);
+	}
+
+	async function runGeocode() {
+		const q = addressQuery.trim();
+		try {
+			const res = await fetch(`/api/geocode?q=${encodeURIComponent(q)}`);
+			if (!res.ok) {
+				geocodeError = 'Could not search.';
+				suggestions = [];
+				return;
+			}
+			const body = (await res.json()) as { suggestions: GeocodeSuggestion[] };
+			suggestions = body.suggestions;
+			suggestionsOpen = true;
+		} catch {
+			geocodeError = 'Could not search.';
+			suggestions = [];
+		} finally {
+			geocodeLoading = false;
+		}
+	}
+
+	function selectSuggestion(s: GeocodeSuggestion) {
+		data.site.address = s.label;
+		data.site.geocode = { lat: s.lat, lng: s.lng };
+		data.site.state = s.state;
+		data.site.postcode = s.postcode;
+		addressQuery = s.label;
+		suggestionsOpen = false;
+		suggestions = [];
+		highlightIndex = -1;
+		hasGeocode = true;
+		void save();
+	}
+
+	function onAddressKey(e: KeyboardEvent) {
+		if (!suggestionsOpen || suggestions.length === 0) return;
+		if (e.key === 'ArrowDown') {
+			e.preventDefault();
+			highlightIndex = (highlightIndex + 1) % suggestions.length;
+		} else if (e.key === 'ArrowUp') {
+			e.preventDefault();
+			highlightIndex = (highlightIndex - 1 + suggestions.length) % suggestions.length;
+		} else if (e.key === 'Enter') {
+			if (highlightIndex >= 0) {
+				e.preventDefault();
+				selectSuggestion(suggestions[highlightIndex]);
+			}
+		} else if (e.key === 'Escape') {
+			suggestionsOpen = false;
+		}
+	}
+
+	function clearAddress() {
+		data.site.address = '';
+		data.site.geocode = null;
+		data.site.state = null;
+		data.site.postcode = '';
+		addressQuery = '';
+		hasGeocode = false;
+		suggestions = [];
+		suggestionsOpen = false;
 		void save();
 	}
 </script>
@@ -137,17 +238,69 @@
 			/>
 		</label>
 
-		<label class="full">
-			<span>Site address</span>
-			<input
-				type="text"
-				bind:value={data.site.address}
-				oninput={scheduleSave}
-				onblur={onBlur}
-				autocomplete="street-address"
-				placeholder="12 Smith St, Brisbane QLD 4000"
-			/>
+		<label class="full address-field">
+			<span class="row">
+				<span>Site address</span>
+				{#if hasGeocode}
+					<button type="button" class="link" onclick={clearAddress}>Change</button>
+				{/if}
+			</span>
+			<div class="autocomplete">
+				<input
+					type="text"
+					bind:value={addressQuery}
+					oninput={onAddressInput}
+					onkeydown={onAddressKey}
+					autocomplete="street-address"
+					placeholder="Start typing an Australian address…"
+					aria-autocomplete="list"
+				/>
+				{#if suggestionsOpen && (suggestions.length > 0 || geocodeLoading || geocodeError)}
+					<ul class="suggestions" role="listbox">
+						{#if geocodeLoading && suggestions.length === 0}
+							<li class="status">Searching…</li>
+						{:else if geocodeError}
+							<li class="status err">{geocodeError}</li>
+						{:else if suggestions.length === 0}
+							<li class="status">No matches</li>
+						{:else}
+							{#each suggestions as s, i (s.label)}
+								<li
+									role="option"
+									class:active={i === highlightIndex}
+									aria-selected={i === highlightIndex}
+								>
+									<button type="button" onclick={() => selectSuggestion(s)} onmouseenter={() => (highlightIndex = i)}>
+										{s.label}
+									</button>
+								</li>
+							{/each}
+						{/if}
+					</ul>
+				{/if}
+			</div>
 		</label>
+
+		{#if hasGeocode && data.site.geocode && mapboxToken}
+			<div class="map-preview full" aria-label="Site preview">
+				<img
+					src={staticMapUrl({
+						token: mapboxToken,
+						lng: data.site.geocode.lng,
+						lat: data.site.geocode.lat
+					})}
+					alt="Satellite view of {data.site.address}"
+					loading="lazy"
+				/>
+				<div class="map-meta">
+					{#if data.site.state}<span class="chip">{data.site.state}</span>{/if}
+					{#if data.site.postcode}<span class="chip">{data.site.postcode}</span>{/if}
+					<span class="coords">
+						{data.site.geocode.lat.toFixed(5)}, {data.site.geocode.lng.toFixed(5)}
+					</span>
+				</div>
+			</div>
+		{/if}
 
 		<label class="full">
 			<span>Notes</span>
@@ -203,6 +356,22 @@
 	label.full {
 		grid-column: 1 / -1;
 	}
+	.row {
+		display: flex;
+		justify-content: space-between;
+		align-items: baseline;
+	}
+	.link {
+		background: transparent;
+		border: none;
+		color: var(--accent);
+		font-size: 0.8rem;
+		padding: 0;
+		cursor: pointer;
+	}
+	.link:hover {
+		text-decoration: underline;
+	}
 	input,
 	textarea {
 		background: var(--surface);
@@ -221,6 +390,91 @@
 		resize: vertical;
 		min-height: 4.5rem;
 	}
+
+	/* autocomplete */
+	.autocomplete {
+		position: relative;
+	}
+	.suggestions {
+		position: absolute;
+		top: calc(100% + 4px);
+		left: 0;
+		right: 0;
+		z-index: 5;
+		margin: 0;
+		padding: 0.25rem;
+		list-style: none;
+		background: var(--surface);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+		max-height: 18rem;
+		overflow-y: auto;
+	}
+	.suggestions li {
+		display: block;
+	}
+	.suggestions li button {
+		width: 100%;
+		text-align: left;
+		background: transparent;
+		border: none;
+		color: var(--text);
+		font-size: 0.9rem;
+		padding: 0.5rem 0.625rem;
+		border-radius: 6px;
+		cursor: pointer;
+	}
+	.suggestions li.active button,
+	.suggestions li button:hover {
+		background: var(--border);
+	}
+	.suggestions .status {
+		padding: 0.6rem 0.75rem;
+		color: var(--text-muted);
+		font-size: 0.85rem;
+	}
+	.suggestions .status.err {
+		color: var(--danger);
+	}
+
+	/* map preview */
+	.map-preview {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+		grid-column: 1 / -1;
+	}
+	.map-preview img {
+		display: block;
+		width: 100%;
+		max-width: 600px;
+		border-radius: 12px;
+		border: 1px solid var(--border);
+		aspect-ratio: 600 / 280;
+		object-fit: cover;
+	}
+	.map-meta {
+		display: flex;
+		gap: 0.5rem;
+		align-items: center;
+		flex-wrap: wrap;
+		font-size: 0.8rem;
+		color: var(--text-muted);
+	}
+	.chip {
+		display: inline-block;
+		padding: 0.125rem 0.5rem;
+		border-radius: 999px;
+		background: var(--border);
+		color: var(--text);
+		font-weight: 600;
+		letter-spacing: 0.04em;
+	}
+	.coords {
+		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	}
+
 	.status {
 		margin-top: 1.25rem;
 		display: inline-flex;

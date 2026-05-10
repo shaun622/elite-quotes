@@ -14,8 +14,9 @@ BOOTSTRAP_OWNER_EMAIL=
 # Public URL — used in magic-link emails. http://localhost:5173 in dev.
 PUBLIC_APP_URL=http://localhost:5173
 
-# Optional in PR1 — Sentry error tracking
-SENTRY_DSN=
+# Mapbox public token (pk.…) — Geocoding + Static Images APIs.
+# Restrict by URL in the Mapbox dashboard once your custom domain is set.
+MAPBOX_TOKEN=
 
-# Placeholder for PR2 (map)
-MAPTILER_KEY=
+# Optional — Sentry error tracking
+SENTRY_DSN=

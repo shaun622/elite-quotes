@@ -27,8 +27,8 @@ declare global {
 				RESEND_FROM_EMAIL: string;
 				BOOTSTRAP_OWNER_EMAIL: string;
 				PUBLIC_APP_URL: string;
+				MAPBOX_TOKEN: string;
 				SENTRY_DSN?: string;
-				MAPTILER_KEY?: string;
 			};
 			context: { waitUntil: (promise: Promise<unknown>) => void };
 			caches: CacheStorage & { default: Cache };
