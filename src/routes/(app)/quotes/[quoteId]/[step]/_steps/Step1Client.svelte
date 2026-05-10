@@ -479,6 +479,8 @@
 	}
 	input,
 	textarea {
+		width: 100%;
+		box-sizing: border-box;
 		background: var(--surface);
 		border: 1px solid var(--border);
 		border-radius: 8px;
