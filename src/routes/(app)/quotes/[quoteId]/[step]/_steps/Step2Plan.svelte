@@ -277,6 +277,23 @@
 		scheduleSave();
 	}
 
+	/**
+	 * Click an existing vertex while an in-progress segment is live → extend
+	 * the active segment all the way to that vertex's exact coordinates,
+	 * effectively joining the active run to the existing one.
+	 */
+	function connectActiveToVertex(ref: VertexRef) {
+		if (activeSegIdx === null) return;
+		const segs = segments();
+		const target = segs[ref.segIdx]?.[ref.vertexIdx];
+		if (!target) return;
+		const seg = segs[activeSegIdx] ?? [];
+		const updated = segs.slice();
+		updated[activeSegIdx] = [...seg, target];
+		setSegments(updated);
+		scheduleSave();
+	}
+
 	// --- click logic -------------------------------------------------------
 	function handleMapClick(lngLat: LngLat) {
 		// Pan tool: clicks ignored. Drag still pans the map natively.
@@ -721,7 +738,22 @@
 					el.addEventListener('click', (e) => {
 						e.stopPropagation();
 						if (tool !== 'draw') return;
-						branchFromVertex(ref);
+						// Click on the active end itself = "I'm done with this segment".
+						if (
+							activeSegIdx !== null &&
+							ref.segIdx === activeSegIdx &&
+							ref.vertexIdx === (segments()[activeSegIdx]?.length ?? 0) - 1
+						) {
+							endSegment();
+							return;
+						}
+						// Active segment in progress → extend to this vertex (connect).
+						// Otherwise → branch a new sub-segment from this vertex.
+						if (activeSegIdx !== null) {
+							connectActiveToVertex(ref);
+						} else {
+							branchFromVertex(ref);
+						}
 					});
 					el.addEventListener('contextmenu', (e) => {
 						e.preventDefault();
@@ -938,11 +970,10 @@
 					Tap to start a new disconnected section, or click an existing point to branch from there.
 				{/if}
 			{:else if activeSegLen() === 1}
-				Tap to add the next point in this section.
+				Tap to add the next point in this section, or click an existing point to connect to it.
 			{:else}
-				Keep tapping to extend. Hold near 90° from the previous segment for a snap.
+				Keep tapping to extend. Click an existing point to <em>connect</em> to it, or hit End segment to start fresh.
 				{#if snapHintLabel}<strong class="snap-tag">snap {snapHintLabel}</strong>{/if}
-				Click an existing point to start a new branch from there.
 			{/if}
 		</div>
 	</div>
@@ -1177,10 +1208,28 @@
 		cursor: grabbing;
 	}
 	:global(.vertex-handle.active-end) {
-		background: var(--accent);
-		border-color: #fff;
-		width: 16px;
-		height: 16px;
+		width: 20px;
+		height: 20px;
+		background: #4ad165;
+		border: 3px solid #ffffff;
+		box-shadow:
+			0 0 0 2px rgba(0, 0, 0, 0.55),
+			0 0 14px 4px rgba(74, 209, 101, 0.65);
+		animation: active-end-pulse 1.4s ease-in-out infinite;
+		z-index: 2;
+	}
+	@keyframes active-end-pulse {
+		0%,
+		100% {
+			box-shadow:
+				0 0 0 2px rgba(0, 0, 0, 0.55),
+				0 0 14px 4px rgba(74, 209, 101, 0.65);
+		}
+		50% {
+			box-shadow:
+				0 0 0 2px rgba(0, 0, 0, 0.55),
+				0 0 22px 8px rgba(74, 209, 101, 0.95);
+		}
 	}
 
 	.summary {
