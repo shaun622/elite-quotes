@@ -20,9 +20,10 @@ export const load: PageServerLoad = async ({ params, locals, platform }) => {
 	if (!result) error(404, 'Quote not found');
 
 	// Mapbox public token — only forwarded to authenticated users on the
-	// step that needs it. Restrict by URL in the Mapbox dashboard for
-	// production hardening.
-	const mapboxToken = stepNum === 1 ? (platform.env.MAPBOX_TOKEN ?? '').trim() : '';
+	// steps that use it (1 + 2). Restrict by URL in the Mapbox dashboard
+	// for production hardening.
+	const mapboxToken =
+		stepNum === 1 || stepNum === 2 ? (platform.env.MAPBOX_TOKEN ?? '').trim() : '';
 
 	return {
 		quoteId: params.quoteId,

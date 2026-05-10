@@ -27,7 +27,17 @@ const SiteSchema = z.object({
 		.object({ lat: z.number(), lng: z.number() })
 		.nullable()
 		.default(null),
-	propertyBoundaryGeoJson: z.unknown().nullable().default(null),
+	propertyBoundaryGeoJson: z
+		.object({
+			type: z.literal('Polygon'),
+			coordinates: z.array(z.array(z.tuple([z.number(), z.number()])))
+		})
+		.nullable()
+		.default(null),
+	// Marks that we already tried to fetch the cadastre. Distinguishes
+	// "haven't asked yet" from "asked and got nothing back" so we don't
+	// re-fetch the boundary every time someone opens Step 2.
+	boundaryAttempted: z.boolean().default(false),
 	state: z
 		.enum(['QLD', 'NSW', 'VIC', 'SA', 'WA', 'TAS', 'ACT', 'NT'])
 		.nullable()
@@ -50,13 +60,21 @@ const WallDefaultsSchema = z.object({
 	concreteStrength: z.enum(['N25', 'N32']).default('N25')
 });
 
+/** GeoJSON LineString for a wall path. WGS84 [lng, lat] coordinates. */
+const PathGeoJsonSchema = z.object({
+	type: z.literal('LineString'),
+	coordinates: z.array(z.tuple([z.number(), z.number()]))
+});
+
 const WallSchema = z.object({
 	id: z.string().min(1),
 	name: z.string().default('Wall 1'),
-	pathGeoJson: z.unknown().nullable().default(null),
+	pathGeoJson: PathGeoJsonSchema.nullable().default(null),
 	posts: z.array(PostSchema).default([]),
 	defaults: WallDefaultsSchema.default(() => WallDefaultsSchema.parse({}))
 });
+
+export type WallPathGeoJson = z.infer<typeof PathGeoJsonSchema>;
 
 const MaterialsSchema = z.object({
 	blockType: z.string().default(''),

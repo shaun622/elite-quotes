@@ -2,6 +2,7 @@
 	import StepShell from '$lib/components/wizard/StepShell.svelte';
 	import { STEPS } from '$lib/wizard';
 	import Step1Client from './_steps/Step1Client.svelte';
+	import Step2Plan from './_steps/Step2Plan.svelte';
 	import StepPlaceholder from './_steps/StepPlaceholder.svelte';
 	import type { PageData } from './$types';
 
@@ -22,9 +23,12 @@
 			mapboxToken={data.mapboxToken}
 		/>
 	{:else if data.step === 2}
-		<StepPlaceholder
-			title="Plan view — draw walls on satellite"
-			body="The map drawing surface lands in PR2. You'll search for an Australian property, the boundary loads from the state cadastre WFS, and you draw wall paths over the satellite imagery."
+		<Step2Plan
+			quoteId={data.quoteId}
+			data={data.data}
+			dataHash={data.dataHash}
+			versionNumber={data.versionNumber}
+			mapboxToken={data.mapboxToken}
 		/>
 	{:else if data.step === 3}
 		<StepPlaceholder
