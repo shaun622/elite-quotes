@@ -60,11 +60,24 @@ const WallDefaultsSchema = z.object({
 	concreteStrength: z.enum(['N25', 'N32']).default('N25')
 });
 
-/** GeoJSON LineString for a wall path. WGS84 [lng, lat] coordinates. */
-const PathGeoJsonSchema = z.object({
-	type: z.literal('LineString'),
-	coordinates: z.array(z.tuple([z.number(), z.number()]))
-});
+/**
+ * GeoJSON path for a wall. WGS84 [lng, lat] coordinates.
+ *
+ * MultiLineString is the canonical shape — a wall can have multiple
+ * disconnected sub-segments (e.g., front fence + side fence with a gate
+ * between them). LineString is accepted for backward compatibility with
+ * earlier saved data and is treated as a single-element MultiLineString.
+ */
+const PathGeoJsonSchema = z.union([
+	z.object({
+		type: z.literal('LineString'),
+		coordinates: z.array(z.tuple([z.number(), z.number()]))
+	}),
+	z.object({
+		type: z.literal('MultiLineString'),
+		coordinates: z.array(z.array(z.tuple([z.number(), z.number()])))
+	})
+]);
 
 const WallSchema = z.object({
 	id: z.string().min(1),

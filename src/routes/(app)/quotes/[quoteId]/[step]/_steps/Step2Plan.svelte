@@ -11,15 +11,18 @@
 	import type { QuoteData } from '$lib/schemas/quote';
 	import {
 		haversineMeters,
-		polylineLengthMeters,
+		multiPolylineLengthMeters,
 		offsetPolyline,
+		pathToSegments,
+		polylineLengthMeters,
+		segmentsToPath,
 		snapAngle,
-		nearestSegment,
-		nearestVertex,
 		type LngLat
 	} from '$lib/wall-math';
 
 	type SaveState = 'idle' | 'saving' | 'saved' | 'conflict' | 'error';
+	type Tool = 'pan' | 'draw';
+	type VertexRef = { segIdx: number; vertexIdx: number };
 
 	let {
 		quoteId,
@@ -44,12 +47,8 @@
 	let saveState: SaveState = $state('idle');
 	let errorMessage = $state('');
 
-	// --- save protocol (shared shape with Step 1) --------------------------
+	// --- save protocol -----------------------------------------------------
 	let saveTimer: ReturnType<typeof setTimeout> | null = null;
-	// Serialised save chain — each save waits for the prior to update dataHash
-	// before sending. Without this, two clicks within ~600ms can both fire with
-	// a stale If-Match header and the second one 409s, the conflict handler
-	// then rolls back local state to the server's pre-second-click view.
 	let saveChain: Promise<void> = Promise.resolve();
 
 	type FreshResponse = { data: QuoteData; dataHash: string; versionNumber: number };
@@ -91,6 +90,7 @@
 				dataHash = fresh.dataHash;
 				versionNumber = fresh.versionNumber;
 				ensureActiveWall();
+				activeSegIdx = null;
 				mapVersion++;
 				setTimeout(() => (saveState = 'idle'), 2500);
 				return;
@@ -114,40 +114,54 @@
 		}
 	}
 
-	// --- wall management ---------------------------------------------------
-	type Mode = 'drawing' | 'editing';
-	type Tool = 'pan' | 'draw';
+	// --- wall + segment state ---------------------------------------------
 	// svelte-ignore state_referenced_locally
 	let activeWallId = $state<string | null>(initialData.walls[0]?.id ?? null);
-	// svelte-ignore state_referenced_locally
-	let mode = $state<Mode>(
-		initialData.walls.length === 0 ||
-			(initialData.walls[0]?.pathGeoJson?.coordinates.length ?? 0) < 2
-			? 'drawing'
-			: 'editing'
-	);
-	// Top-level interaction tool. Pan = clicks do nothing, you just navigate.
-	// Draw = clicks add points / insert vertices. Auto-selected based on wall
-	// state on load and on every wall transition (start/finish/add).
+
+	/** Index of the sub-segment currently being drawn / extended. Null = "pen up". */
+	let activeSegIdx = $state<number | null>(null);
+
+	/** Top-level interaction tool. Pan = clicks ignored, just navigate. */
 	// svelte-ignore state_referenced_locally
 	let tool = $state<Tool>(
-		initialData.walls.length === 0 ||
-			(initialData.walls[0]?.pathGeoJson?.coordinates.length ?? 0) < 2
-			? 'draw'
-			: 'pan'
+		(pathToSegments(initialData.walls[0]?.pathGeoJson ?? null)[0]?.length ?? 0) >= 2
+			? 'pan'
+			: 'draw'
 	);
+
 	let mapVersion = $state(0);
+
+	function activeWall() {
+		return data.walls.find((w) => w.id === activeWallId);
+	}
+
+	function segments(): LngLat[][] {
+		return pathToSegments(activeWall()?.pathGeoJson ?? null);
+	}
+
+	function setSegments(segs: LngLat[][]) {
+		const w = activeWall();
+		if (!w) return;
+		w.pathGeoJson = segmentsToPath(segs);
+		mapVersion++;
+	}
+
+	function activeSegment(): LngLat[] {
+		const idx = activeSegIdx;
+		if (idx === null) return [];
+		const segs = segments();
+		return segs[idx] ?? [];
+	}
 
 	function ensureActiveWall() {
 		if (data.walls.length === 0) {
 			const wall = newEmptyWall(`Wall 1`);
 			data.walls.push(wall);
 			activeWallId = wall.id;
-			mode = 'drawing';
+			activeSegIdx = null;
 		} else if (!activeWallId || !data.walls.some((w) => w.id === activeWallId)) {
 			activeWallId = data.walls[0].id;
-			const c = data.walls[0].pathGeoJson?.coordinates ?? [];
-			mode = c.length < 2 ? 'drawing' : 'editing';
+			activeSegIdx = null;
 		}
 	}
 
@@ -166,30 +180,9 @@
 		};
 	}
 
-	function activeWall() {
-		return data.walls.find((w) => w.id === activeWallId);
-	}
-
-	function activeCoords(): LngLat[] {
-		return (activeWall()?.pathGeoJson?.coordinates ?? []) as LngLat[];
-	}
-
-	function setActiveCoords(coords: LngLat[]) {
-		const w = activeWall();
-		if (!w) return;
-		if (coords.length === 0) {
-			w.pathGeoJson = null;
-		} else {
-			w.pathGeoJson = { type: 'LineString', coordinates: coords };
-		}
-		mapVersion++;
-	}
-
 	function selectWall(id: string) {
 		activeWallId = id;
-		const c = data.walls.find((w) => w.id === id)?.pathGeoJson?.coordinates ?? [];
-		mode = c.length < 2 ? 'drawing' : 'editing';
-		tool = mode === 'drawing' ? 'draw' : 'pan';
+		activeSegIdx = null;
 		mapVersion++;
 	}
 
@@ -197,7 +190,7 @@
 		const next = newEmptyWall(`Wall ${data.walls.length + 1}`);
 		data.walls.push(next);
 		activeWallId = next.id;
-		mode = 'drawing';
+		activeSegIdx = null;
 		tool = 'draw';
 		mapVersion++;
 		scheduleSave();
@@ -211,56 +204,76 @@
 			ensureActiveWall();
 		} else if (activeWallId === id) {
 			activeWallId = data.walls[0].id;
-			const c = data.walls[0].pathGeoJson?.coordinates ?? [];
-			mode = c.length < 2 ? 'drawing' : 'editing';
+			activeSegIdx = null;
 		}
 		mapVersion++;
 		scheduleSave();
 	}
 
 	function undoLastPoint() {
-		const w = activeWall();
-		if (!w) return;
-		const c = (w.pathGeoJson?.coordinates ?? []) as LngLat[];
-		if (c.length === 0) return;
-		setActiveCoords(c.slice(0, -1));
+		const idx = activeSegIdx;
+		if (idx === null) return;
+		const segs = segments();
+		if (!segs[idx] || segs[idx].length === 0) return;
+		const updated = segs.slice();
+		updated[idx] = updated[idx].slice(0, -1);
+		// If the segment is now empty, drop it.
+		if (updated[idx].length === 0) {
+			updated.splice(idx, 1);
+			activeSegIdx = null;
+		}
+		setSegments(updated);
 		scheduleSave();
 	}
 
-	function finishWall() {
-		if (activeCoords().length < 2) return;
-		mode = 'editing';
-		tool = 'pan';
+	function endSegment() {
+		activeSegIdx = null;
 		mapVersion++;
 	}
 
-	function resumeDrawing() {
-		mode = 'drawing';
-		tool = 'draw';
-		mapVersion++;
-	}
-
-	function deleteVertex(index: number) {
-		const c = activeCoords();
-		if (c.length <= 0 || index < 0 || index >= c.length) return;
-		setActiveCoords(c.filter((_, i) => i !== index));
-		// If we drop below 2 points, switch to drawing mode so the user can add more.
-		if (activeCoords().length < 2) mode = 'drawing';
+	function deleteVertex(ref: VertexRef) {
+		const segs = segments();
+		if (!segs[ref.segIdx]) return;
+		const updated = segs.slice();
+		updated[ref.segIdx] = updated[ref.segIdx].filter((_, i) => i !== ref.vertexIdx);
+		if (updated[ref.segIdx].length === 0) {
+			updated.splice(ref.segIdx, 1);
+			if (activeSegIdx === ref.segIdx) activeSegIdx = null;
+			else if (activeSegIdx !== null && activeSegIdx > ref.segIdx) activeSegIdx -= 1;
+		}
+		setSegments(updated);
 		scheduleSave();
 	}
 
-	function moveVertex(index: number, ll: LngLat) {
-		const c = activeCoords().slice();
-		if (index < 0 || index >= c.length) return;
-		c[index] = ll;
-		setActiveCoords(c);
+	function moveVertex(ref: VertexRef, ll: LngLat) {
+		const segs = segments();
+		if (!segs[ref.segIdx]) return;
+		const updated = segs.slice();
+		updated[ref.segIdx] = updated[ref.segIdx].slice();
+		updated[ref.segIdx][ref.vertexIdx] = ll;
+		setSegments(updated);
 		scheduleSave();
 	}
 
-	function insertVertex(segmentIndex: number, ll: LngLat) {
-		const c = activeCoords().slice();
-		c.splice(segmentIndex + 1, 0, ll);
-		setActiveCoords(c);
+	function insertVertexInSegment(segIdx: number, segmentInsertAt: number, ll: LngLat) {
+		const segs = segments();
+		if (!segs[segIdx]) return;
+		const updated = segs.slice();
+		updated[segIdx] = updated[segIdx].slice();
+		updated[segIdx].splice(segmentInsertAt + 1, 0, ll);
+		setSegments(updated);
+		scheduleSave();
+	}
+
+	/** Click an existing vertex → start a new sub-segment branching from it. */
+	function branchFromVertex(ref: VertexRef) {
+		const segs = segments();
+		const v = segs[ref.segIdx]?.[ref.vertexIdx];
+		if (!v) return;
+		const updated = segs.slice();
+		updated.push([v]);
+		setSegments(updated);
+		activeSegIdx = updated.length - 1;
 		scheduleSave();
 	}
 
@@ -271,32 +284,33 @@
 
 		const w = activeWall();
 		if (!w) return;
-		const coords = activeCoords();
+		const segs = segments();
 
-		if (mode === 'drawing') {
-			let next: LngLat = lngLat;
-			// Snap if 2+ existing points
-			if (coords.length >= 2) {
-				const snap = snapAngle({
-					prev: coords[coords.length - 2],
-					pivot: coords[coords.length - 1],
-					candidate: lngLat
-				});
-				if (snap) next = snap.snapped;
-			}
-			setActiveCoords([...coords, next]);
+		if (activeSegIdx === null) {
+			// No active segment → start a new disconnected sub-segment.
+			const updated = segs.slice();
+			updated.push([lngLat]);
+			setSegments(updated);
+			activeSegIdx = updated.length - 1;
 			scheduleSave();
 			return;
 		}
 
-		// editing mode: insert vertex on a clicked segment if click is close enough
-		if (coords.length < 2) return;
-		const seg = nearestSegment(lngLat, coords);
-		if (!seg) return;
-		// Reasonable threshold: 1 metre at this zoom
-		if (seg.distanceM <= 1) {
-			insertVertex(seg.index, lngLat);
+		// Extend active segment, snapping to 90° if applicable.
+		const seg = segs[activeSegIdx] ?? [];
+		let next: LngLat = lngLat;
+		if (seg.length >= 2) {
+			const snap = snapAngle({
+				prev: seg[seg.length - 2],
+				pivot: seg[seg.length - 1],
+				candidate: lngLat
+			});
+			if (snap) next = snap.snapped;
 		}
+		const updated = segs.slice();
+		updated[activeSegIdx] = [...seg, next];
+		setSegments(updated);
+		scheduleSave();
 	}
 
 	// --- map -----------------------------------------------------------------
@@ -304,9 +318,6 @@
 	let mapStatus: 'idle' | 'loading' | 'ready' = $state('idle');
 	let mapInstance: MLMap | null = null;
 	let activeVertexMarkers: MLMarker[] = [];
-	// Cached MapLibre constructors after dynamic import. Typed loosely because
-	// maplibre-gl's d.ts surfaces named exports but not the default-export
-	// object shape — the runtime shape is consistent regardless.
 	let mlCtors: {
 		Marker: typeof import('maplibre-gl').Marker;
 		LngLatBounds: typeof import('maplibre-gl').LngLatBounds;
@@ -315,11 +326,10 @@
 	let snapHintLabel = $state<string>('');
 
 	const initialCenter: LngLat = (() => {
-		// Prefer last point of any wall, then site geocode, then fallback (Brisbane CBD).
 		// svelte-ignore state_referenced_locally
 		for (const w of initialData.walls) {
-			const c = w.pathGeoJson?.coordinates;
-			if (c && c.length > 0) return c[c.length - 1] as LngLat;
+			const segs = pathToSegments(w.pathGeoJson ?? null);
+			for (const seg of segs) if (seg.length > 0) return seg[seg.length - 1];
 		}
 		// svelte-ignore state_referenced_locally
 		const g = initialData.site.geocode;
@@ -380,7 +390,6 @@
 			m.on('load', () => {
 				if (cancelled) return;
 
-				// Empty sources — populated by the dedicated sync effect.
 				const empty = (): GeoJSON.FeatureCollection => ({
 					type: 'FeatureCollection',
 					features: []
@@ -394,7 +403,6 @@
 				m.addSource('snap-hint', { type: 'geojson', data: empty() });
 				m.addSource('hover-ghost', { type: 'geojson', data: empty() });
 
-				// Property boundary — dashed white.
 				m.addLayer({
 					id: 'boundary-line',
 					source: 'boundary',
@@ -407,19 +415,13 @@
 					}
 				});
 
-				// Other walls — dimmed grey-orange.
 				m.addLayer({
 					id: 'walls-other-line',
 					source: 'walls-other',
 					type: 'line',
-					paint: {
-						'line-color': '#ff8a1c',
-						'line-width': 3,
-						'line-opacity': 0.45
-					}
+					paint: { 'line-color': '#ff8a1c', 'line-width': 3, 'line-opacity': 0.45 }
 				});
 
-				// Active wall offset (the parallel line at boundary offset distance) — light orange.
 				m.addLayer({
 					id: 'wall-active-offset-line',
 					source: 'wall-active-offset',
@@ -432,18 +434,13 @@
 					}
 				});
 
-				// Active wall — bright orange.
 				m.addLayer({
 					id: 'wall-active-line',
 					source: 'wall-active',
 					type: 'line',
-					paint: {
-						'line-color': '#ff8a1c',
-						'line-width': 4
-					}
+					paint: { 'line-color': '#ff8a1c', 'line-width': 4 }
 				});
 
-				// Hover ghost during drawing — translucent extension to the cursor.
 				m.addLayer({
 					id: 'hover-ghost-line',
 					source: 'hover-ghost',
@@ -456,7 +453,6 @@
 					}
 				});
 
-				// Snap-hint overlay — shows when a 90°/180°/270° snap kicks in.
 				m.addLayer({
 					id: 'snap-hint-line',
 					source: 'snap-hint',
@@ -469,7 +465,6 @@
 					}
 				});
 
-				// Per-segment length labels.
 				m.addLayer({
 					id: 'wall-segment-labels-text',
 					source: 'wall-segment-labels',
@@ -518,7 +513,6 @@
 	}
 
 	function onMapClick(e: MapMouseEvent) {
-		// Skip if click landed on a vertex marker — markers handle their own events.
 		const target = (e.originalEvent.target as HTMLElement) ?? null;
 		if (target && target.closest('.vertex-handle')) return;
 		handleMapClick([e.lngLat.lng, e.lngLat.lat]);
@@ -526,51 +520,39 @@
 
 	function onMapMouseMove(e: MapMouseEvent) {
 		if (!mapInstance) return;
-		// In pan tool, no ghost line / snap hint — keeps the map "quiet" while
-		// the user is just navigating.
 		if (tool === 'pan') {
 			clearHover();
 			return;
 		}
 		const ll: LngLat = [e.lngLat.lng, e.lngLat.lat];
-		const coords = activeCoords();
+		const segs = segments();
 
-		if (mode === 'drawing' && coords.length >= 1) {
-			let endPoint: LngLat = ll;
-			let snapHit: ReturnType<typeof snapAngle> = null;
-
-			if (coords.length >= 2) {
-				snapHit = snapAngle({
-					prev: coords[coords.length - 2],
-					pivot: coords[coords.length - 1],
-					candidate: ll
-				});
-				if (snapHit) endPoint = snapHit.snapped;
+		if (activeSegIdx !== null) {
+			const seg = segs[activeSegIdx] ?? [];
+			if (seg.length >= 1) {
+				let endPoint: LngLat = ll;
+				let snapHit: ReturnType<typeof snapAngle> = null;
+				if (seg.length >= 2) {
+					snapHit = snapAngle({
+						prev: seg[seg.length - 2],
+						pivot: seg[seg.length - 1],
+						candidate: ll
+					});
+					if (snapHit) endPoint = snapHit.snapped;
+				}
+				setHoverGhost([seg[seg.length - 1], endPoint]);
+				if (snapHit) {
+					snapHintCoords = [seg[seg.length - 1], endPoint];
+					snapHintLabel = `${snapHit.angleDeg}°`;
+					setSnapHint(snapHintCoords);
+				} else {
+					snapHintCoords = null;
+					setSnapHint(null);
+				}
+				return;
 			}
-
-			setHoverGhost([coords[coords.length - 1], endPoint]);
-
-			if (snapHit) {
-				snapHintCoords = [coords[coords.length - 1], endPoint];
-				snapHintLabel = `${snapHit.angleDeg}°`;
-				setSnapHint(snapHintCoords);
-			} else {
-				snapHintCoords = null;
-				setSnapHint(null);
-			}
-		} else if (mode === 'editing' && coords.length >= 2) {
-			// Show a faint marker hint when hovering close to a segment, suggesting "click to add a point here"
-			const seg = nearestSegment(ll, coords);
-			if (seg && seg.distanceM <= 1) {
-				setHoverGhost(null);
-				setSnapHint([coords[seg.index], ll, coords[seg.index + 1]]);
-			} else {
-				setHoverGhost(null);
-				setSnapHint(null);
-			}
-		} else {
-			clearHover();
 		}
+		clearHover();
 	}
 
 	function clearHover() {
@@ -607,14 +589,13 @@
 		);
 	}
 
-	// --- effect: sync sources + markers when walls/mode/active change -----
+	// --- effect: sync map sources + vertex markers ------------------------
 	$effect(() => {
 		mapVersion;
 		if (!browser || !mapInstance || mapStatus !== 'ready') return;
 		untrack(() => syncSourcesAndMarkers());
 	});
 
-	// --- effect: cursor reflects the active tool ---------------------------
 	$effect(() => {
 		const t = tool;
 		if (!browser || !mapInstance || mapStatus !== 'ready') return;
@@ -627,80 +608,86 @@
 		const m = mapInstance;
 		const aId = activeWallId;
 		const aWall = data.walls.find((w) => w.id === aId);
-		const aCoords = (aWall?.pathGeoJson?.coordinates ?? []) as LngLat[];
+		const aSegments = aWall ? pathToSegments(aWall.pathGeoJson ?? null) : [];
 		const offsetMm = aWall?.defaults.boundaryOffsetMm ?? 100;
 
-		// Other walls
-		(m.getSource('walls-other') as GeoJSONSource).setData({
-			type: 'FeatureCollection',
-			features: data.walls
-				.filter((w) => w.id !== aId && (w.pathGeoJson?.coordinates.length ?? 0) >= 2)
-				.map((w) => ({
-					type: 'Feature',
-					properties: { id: w.id, name: w.name },
-					geometry: w.pathGeoJson! as GeoJSON.LineString
-				}))
-		});
-
-		// Active wall line
-		(m.getSource('wall-active') as GeoJSONSource).setData(
-			aCoords.length >= 2
-				? {
-						type: 'Feature',
-						properties: { id: aWall?.id },
-						geometry: { type: 'LineString', coordinates: aCoords }
-					}
-				: { type: 'FeatureCollection', features: [] }
-		);
-
-		// Active wall offset (parallel line)
-		const offsetCoords =
-			aCoords.length >= 2 ? offsetPolyline(aCoords, offsetMm / 1000) : [];
-		(m.getSource('wall-active-offset') as GeoJSONSource).setData(
-			offsetCoords.length >= 2
-				? {
-						type: 'Feature',
-						properties: {},
-						geometry: { type: 'LineString', coordinates: offsetCoords }
-					}
-				: { type: 'FeatureCollection', features: [] }
-		);
-
-		// Segment-length labels — midpoint of each segment with the metres reading.
-		const labelFeatures: GeoJSON.Feature[] = [];
-		for (let i = 0; i < aCoords.length - 1; i++) {
-			const a = aCoords[i];
-			const b = aCoords[i + 1];
-			const len = haversineMeters(a, b);
-			const mid: LngLat = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
-			labelFeatures.push({
-				type: 'Feature',
-				properties: { label: `${len.toFixed(1)} m` },
-				geometry: { type: 'Point', coordinates: mid }
-			});
-		}
-		// Other walls' segment lengths too — fainter.
+		// Other walls — flatten each wall's MultiLineString into a single feature collection
+		const otherFeatures: GeoJSON.Feature[] = [];
 		for (const w of data.walls) {
 			if (w.id === aId) continue;
-			const c = (w.pathGeoJson?.coordinates ?? []) as LngLat[];
-			for (let i = 0; i < c.length - 1; i++) {
-				const a = c[i];
-				const b = c[i + 1];
-				const len = haversineMeters(a, b);
-				const mid: LngLat = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
-				labelFeatures.push({
-					type: 'Feature',
-					properties: { label: `${len.toFixed(1)} m` },
-					geometry: { type: 'Point', coordinates: mid }
-				});
+			const segs = pathToSegments(w.pathGeoJson ?? null);
+			for (const seg of segs) {
+				if (seg.length >= 2) {
+					otherFeatures.push({
+						type: 'Feature',
+						properties: { id: w.id, name: w.name },
+						geometry: { type: 'LineString', coordinates: seg }
+					});
+				}
 			}
+		}
+		(m.getSource('walls-other') as GeoJSONSource).setData({
+			type: 'FeatureCollection',
+			features: otherFeatures
+		});
+
+		// Active wall: one feature per renderable sub-segment.
+		const activeFeatures: GeoJSON.Feature[] = [];
+		const offsetFeatures: GeoJSON.Feature[] = [];
+		for (const seg of aSegments) {
+			if (seg.length >= 2) {
+				activeFeatures.push({
+					type: 'Feature',
+					properties: {},
+					geometry: { type: 'LineString', coordinates: seg }
+				});
+				const off = offsetPolyline(seg, offsetMm / 1000);
+				if (off.length >= 2) {
+					offsetFeatures.push({
+						type: 'Feature',
+						properties: {},
+						geometry: { type: 'LineString', coordinates: off }
+					});
+				}
+			}
+		}
+		(m.getSource('wall-active') as GeoJSONSource).setData({
+			type: 'FeatureCollection',
+			features: activeFeatures
+		});
+		(m.getSource('wall-active-offset') as GeoJSONSource).setData({
+			type: 'FeatureCollection',
+			features: offsetFeatures
+		});
+
+		// Length labels — midpoint of every edge across active + other walls.
+		const labelFeatures: GeoJSON.Feature[] = [];
+		const pushLabels = (segs: LngLat[][]) => {
+			for (const seg of segs) {
+				for (let i = 0; i < seg.length - 1; i++) {
+					const a = seg[i];
+					const b = seg[i + 1];
+					const len = haversineMeters(a, b);
+					const mid: LngLat = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+					labelFeatures.push({
+						type: 'Feature',
+						properties: { label: `${len.toFixed(1)} m` },
+						geometry: { type: 'Point', coordinates: mid }
+					});
+				}
+			}
+		};
+		pushLabels(aSegments);
+		for (const w of data.walls) {
+			if (w.id === aId) continue;
+			pushLabels(pathToSegments(w.pathGeoJson ?? null));
 		}
 		(m.getSource('wall-segment-labels') as GeoJSONSource).setData({
 			type: 'FeatureCollection',
 			features: labelFeatures
 		});
 
-		// Boundary
+		// Property boundary
 		const boundary = data.site.propertyBoundaryGeoJson;
 		(m.getSource('boundary') as GeoJSONSource).setData(
 			boundary
@@ -712,37 +699,46 @@
 				: { type: 'FeatureCollection', features: [] }
 		);
 
-		// Vertex markers for the active wall
+		// Vertex markers — every vertex of every sub-segment of the active wall.
 		clearVertexMarkers();
 		if (mlCtors && aWall) {
 			const { Marker } = mlCtors;
-			aCoords.forEach((c, idx) => {
-				const el = document.createElement('div');
-				el.className = 'vertex-handle';
-				el.dataset.index = String(idx);
-				const marker = new Marker({ element: el, draggable: true })
-					.setLngLat(c)
-					.addTo(m);
-				marker.on('dragend', () => {
-					const ll = marker.getLngLat();
-					moveVertex(idx, [ll.lng, ll.lat]);
+			aSegments.forEach((seg, segIdx) => {
+				seg.forEach((c, vertexIdx) => {
+					const ref: VertexRef = { segIdx, vertexIdx };
+					const el = document.createElement('div');
+					el.className = 'vertex-handle';
+					if (activeSegIdx === segIdx && vertexIdx === seg.length - 1) {
+						el.classList.add('active-end');
+					}
+					const marker = new Marker({ element: el, draggable: true })
+						.setLngLat(c)
+						.addTo(m);
+					marker.on('dragend', () => {
+						const ll = marker.getLngLat();
+						moveVertex(ref, [ll.lng, ll.lat]);
+					});
+					el.addEventListener('click', (e) => {
+						e.stopPropagation();
+						if (tool !== 'draw') return;
+						branchFromVertex(ref);
+					});
+					el.addEventListener('contextmenu', (e) => {
+						e.preventDefault();
+						if (confirm('Remove this point?')) deleteVertex(ref);
+					});
+					el.addEventListener('dblclick', (e) => {
+						e.preventDefault();
+						deleteVertex(ref);
+					});
+					activeVertexMarkers.push(marker);
 				});
-				el.addEventListener('contextmenu', (e) => {
-					e.preventDefault();
-					if (confirm('Remove this point?')) deleteVertex(idx);
-				});
-				el.addEventListener('dblclick', (e) => {
-					e.preventDefault();
-					deleteVertex(idx);
-				});
-				activeVertexMarkers.push(marker);
 			});
 		}
 	}
 
 	// --- keyboard shortcuts ------------------------------------------------
 	function onKey(e: KeyboardEvent) {
-		// Only handle when the map area is focused-ish (not while typing in the textarea)
 		const tag = (e.target as HTMLElement | null)?.tagName?.toLowerCase();
 		if (tag === 'input' || tag === 'textarea') return;
 		if (e.key === 'v' || e.key === 'V') {
@@ -750,20 +746,13 @@
 		} else if (e.key === 'd' || e.key === 'D') {
 			tool = 'draw';
 		} else if (e.key === 'Escape') {
-			if (mode === 'drawing' && activeCoords().length === 0) return;
-			if (mode === 'drawing') {
-				// Cancel current draw — discard active wall points
-				setActiveCoords([]);
-				scheduleSave();
-			}
+			endSegment();
 		} else if ((e.key === 'z' || e.key === 'Z') && (e.ctrlKey || e.metaKey)) {
-			if (mode === 'drawing') {
-				e.preventDefault();
-				undoLastPoint();
-			}
-		} else if (e.key === 'Enter' && mode === 'drawing' && activeCoords().length >= 2) {
 			e.preventDefault();
-			finishWall();
+			undoLastPoint();
+		} else if (e.key === 'Enter' && activeSegIdx !== null && activeSegment().length >= 2) {
+			e.preventDefault();
+			endSegment();
 		}
 	}
 
@@ -792,11 +781,10 @@
 				mapVersion++;
 				scheduleSave();
 				if (body.boundary) {
-					// Re-fit so the boundary is visible.
 					setTimeout(() => fitMapToContent(), 700);
 				}
 			} catch {
-				// Silently fall back to no-boundary mode.
+				/* fall back to no boundary */
 			}
 		})();
 	});
@@ -804,7 +792,6 @@
 	// --- initial init ------------------------------------------------------
 	ensureActiveWall();
 
-	// Auto-fit map to show all walls + boundary on first ready.
 	$effect(() => {
 		if (!browser || !mapInstance || mapStatus !== 'ready' || !mlCtors) return;
 		untrack(() => fitMapToContent());
@@ -815,8 +802,8 @@
 		const { LngLatBounds } = mlCtors;
 		const points: LngLat[] = [];
 		for (const w of data.walls) {
-			for (const c of (w.pathGeoJson?.coordinates ?? []) as LngLat[]) {
-				points.push(c);
+			for (const seg of pathToSegments(w.pathGeoJson ?? null)) {
+				for (const c of seg) points.push(c);
 			}
 		}
 		const boundary = data.site.propertyBoundaryGeoJson;
@@ -842,11 +829,14 @@
 		const perWall = data.walls.map((w) => ({
 			id: w.id,
 			name: w.name,
-			meters: polylineLengthMeters((w.pathGeoJson?.coordinates ?? []) as LngLat[])
+			meters: multiPolylineLengthMeters(pathToSegments(w.pathGeoJson ?? null))
 		}));
 		const total = perWall.reduce((s, p) => s + p.meters, 0);
 		return { perWall, total };
 	});
+
+	const activeSegLen = $derived(() => activeSegment().length);
+	const activeWallSegmentCount = $derived(() => segments().length);
 </script>
 
 <svelte:window onkeydown={onKey} />
@@ -855,7 +845,7 @@
 	<header class="topbar">
 		<div class="walls-tabs" role="tablist">
 			{#each data.walls as w (w.id)}
-				{@const len = polylineLengthMeters((w.pathGeoJson?.coordinates ?? []) as LngLat[])}
+				{@const len = multiPolylineLengthMeters(pathToSegments(w.pathGeoJson ?? null))}
 				<button
 					type="button"
 					role="tab"
@@ -871,37 +861,31 @@
 		</div>
 
 		<div class="mode-actions">
-			{#if mode === 'drawing'}
-				<button
-					type="button"
-					class="btn ghost"
-					onclick={undoLastPoint}
-					disabled={activeCoords().length === 0}
-				>
-					Undo
-				</button>
-				<button
-					type="button"
-					class="btn primary"
-					onclick={finishWall}
-					disabled={activeCoords().length < 2}
-				>
-					Finish wall
-				</button>
-			{:else}
-				<button type="button" class="btn ghost" onclick={resumeDrawing}>+ Add points</button>
-				<button
-					type="button"
-					class="btn danger"
-					onclick={() => {
-						if (activeWallId && confirm(`Delete ${activeWall()?.name}?`)) {
-							deleteWall(activeWallId);
-						}
-					}}
-				>
-					Delete wall
+			<button
+				type="button"
+				class="btn ghost"
+				onclick={undoLastPoint}
+				disabled={activeSegIdx === null || activeSegLen() === 0}
+				title="Undo last point (Ctrl+Z)"
+			>
+				Undo
+			</button>
+			{#if activeSegIdx !== null && activeSegLen() >= 2}
+				<button type="button" class="btn primary" onclick={endSegment} title="End segment (Enter)">
+					End segment
 				</button>
 			{/if}
+			<button
+				type="button"
+				class="btn danger"
+				onclick={() => {
+					if (activeWallId && confirm(`Delete ${activeWall()?.name}?`)) {
+						deleteWall(activeWallId);
+					}
+				}}
+			>
+				Delete wall
+			</button>
 		</div>
 	</header>
 
@@ -911,7 +895,6 @@
 			<div class="map-loading">Loading satellite…</div>
 		{/if}
 
-		<!-- Tool palette: Pan vs Draw. Stays clear of MapLibre's top-right nav controls. -->
 		<div class="tools" role="toolbar" aria-label="Map tool">
 			<button
 				type="button"
@@ -948,17 +931,18 @@
 		<div class="map-hint">
 			{#if tool === 'pan'}
 				Pan tool — drag to navigate, scroll/pinch to zoom. Switch to Draw to add points.
-			{:else if mode === 'drawing'}
-				{#if activeCoords().length === 0}
-					Tap the map to drop the first wall point.
-				{:else if activeCoords().length === 1}
-					Tap to add the next point — at least 2 points needed.
+			{:else if activeSegIdx === null}
+				{#if activeWallSegmentCount() === 0}
+					Tap the map to drop your first wall point.
 				{:else}
-					Keep tapping to extend. Hold near 90° from the previous segment for a snap.
-					{#if snapHintLabel}<strong class="snap-tag">snap {snapHintLabel}</strong>{/if}
+					Tap to start a new disconnected section, or click an existing point to branch from there.
 				{/if}
+			{:else if activeSegLen() === 1}
+				Tap to add the next point in this section.
 			{:else}
-				Tap on the line between vertices to insert one. Drag any vertex to fine-tune. Double-click a vertex to remove it.
+				Keep tapping to extend. Hold near 90° from the previous segment for a snap.
+				{#if snapHintLabel}<strong class="snap-tag">snap {snapHintLabel}</strong>{/if}
+				Click an existing point to start a new branch from there.
 			{/if}
 		</div>
 	</div>
@@ -1123,8 +1107,15 @@
 		line-height: 1.35;
 		pointer-events: none;
 	}
+	.snap-tag {
+		display: inline-block;
+		background: var(--success);
+		color: #0b0b0c;
+		padding: 0.05rem 0.4rem;
+		border-radius: 4px;
+		margin-left: 0.4rem;
+	}
 
-	/* Tool palette — top-left of the map, away from MapLibre's top-right nav */
 	.tools {
 		position: absolute;
 		top: 0.6rem;
@@ -1172,14 +1163,6 @@
 		font-size: 0.55rem;
 		line-height: 1;
 	}
-	.snap-tag {
-		display: inline-block;
-		background: var(--success);
-		color: #0b0b0c;
-		padding: 0.05rem 0.4rem;
-		border-radius: 4px;
-		margin-left: 0.4rem;
-	}
 
 	:global(.vertex-handle) {
 		width: 14px;
@@ -1192,6 +1175,12 @@
 	}
 	:global(.vertex-handle:active) {
 		cursor: grabbing;
+	}
+	:global(.vertex-handle.active-end) {
+		background: var(--accent);
+		border-color: #fff;
+		width: 16px;
+		height: 16px;
 	}
 
 	.summary {

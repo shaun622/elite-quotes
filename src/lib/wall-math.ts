@@ -34,6 +34,43 @@ export function polylineLengthMeters(coords: LngLat[]): number {
 	return total;
 }
 
+/** Sum of polyline lengths across an array of disconnected sub-segments. */
+export function multiPolylineLengthMeters(segments: LngLat[][]): number {
+	let total = 0;
+	for (const seg of segments) total += polylineLengthMeters(seg);
+	return total;
+}
+
+/**
+ * Normalise a stored path (LineString | MultiLineString | null) into a flat
+ * array-of-segments shape that the drawing UI works with throughout.
+ */
+type StoredPath =
+	| { type: 'LineString'; coordinates: [number, number][] }
+	| { type: 'MultiLineString'; coordinates: [number, number][][] }
+	| null
+	| undefined;
+
+export function pathToSegments(path: StoredPath): LngLat[][] {
+	if (!path) return [];
+	if (path.type === 'LineString') {
+		return path.coordinates.length > 0 ? [path.coordinates.slice() as LngLat[]] : [];
+	}
+	return path.coordinates.map((seg) => seg.slice() as LngLat[]);
+}
+
+/**
+ * Convert segments back to the canonical MultiLineString storage shape.
+ * Drops empty sub-segments. Returns null when there's nothing to store.
+ */
+export function segmentsToPath(
+	segments: LngLat[][]
+): { type: 'MultiLineString'; coordinates: [number, number][][] } | null {
+	const cleaned = segments.filter((seg) => seg.length > 0);
+	if (cleaned.length === 0) return null;
+	return { type: 'MultiLineString', coordinates: cleaned };
+}
+
 /**
  * Local east/north metres-per-degree at a given latitude.
  * Good enough at property scale (<1 km extents).
