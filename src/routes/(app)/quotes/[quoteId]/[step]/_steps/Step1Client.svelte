@@ -436,7 +436,7 @@
 
 <style>
 	.form {
-		max-width: 40rem;
+		max-width: 56rem;
 	}
 	h2 {
 		font-size: 1.25rem;
