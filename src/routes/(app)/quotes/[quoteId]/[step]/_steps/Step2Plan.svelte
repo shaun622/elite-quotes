@@ -346,10 +346,12 @@
 	let snapHintCoords = $state<LngLat[] | null>(null);
 	let snapHintLabel = $state<string>('');
 
-	/** Screen position of the active segment's last vertex — used to anchor
-	 *  the Set-Length popover. Updated on map move and on segment changes. */
-	let activeEndScreenPos = $state<{ x: number; y: number } | null>(null);
-	let lastSegInput = $state<string>('');
+	/** Per-edge length-edit state. Keyed by `${segIdx}:${edgeIdx}`; value is
+	 *  the in-progress text input. The active wall's edges show in the side
+	 *  panel and each edge has its own little input. */
+	let edgeLenInputs = $state<Record<string, string>>({});
+	/** Briefly highlight an edge after a successful Set Length action. */
+	let recentlySetEdge = $state<string | null>(null);
 
 	const initialCenter: LngLat = (() => {
 		// svelte-ignore state_referenced_locally
@@ -508,13 +510,10 @@
 				m.on('click', onMapClick);
 				m.on('mousemove', onMapMouseMove);
 				m.on('mouseleave', () => clearHover());
-				m.on('move', updateActiveEndPos);
-				m.on('moveend', updateActiveEndPos);
 
 				mapInstance = m;
 				mapStatus = 'ready';
 				syncSourcesAndMarkers();
-				updateActiveEndPos();
 			});
 		})();
 
@@ -641,46 +640,57 @@
 	$effect(() => {
 		mapVersion;
 		if (!browser || !mapInstance || mapStatus !== 'ready') return;
-		untrack(() => {
-			syncSourcesAndMarkers();
-			updateActiveEndPos();
-		});
+		untrack(() => syncSourcesAndMarkers());
 	});
 
-	function updateActiveEndPos() {
-		if (!mapInstance || activeSegIdx === null) {
-			activeEndScreenPos = null;
-			return;
-		}
-		const seg = activeSegment();
-		if (seg.length < 2) {
-			activeEndScreenPos = null;
-			return;
-		}
-		const last = seg[seg.length - 1];
-		const projected = mapInstance.project({ lng: last[0], lat: last[1] });
-		activeEndScreenPos = { x: projected.x, y: projected.y };
-	}
-
-	function applyLastSegLen() {
-		const target = parseFloat(lastSegInput);
-		if (!Number.isFinite(target) || target <= 0) return;
+	/**
+	 * Set the length of an arbitrary edge (between vertex `edgeIdx` and
+	 * vertex `edgeIdx+1`) in segment `segIdx` of the active wall. The end
+	 * vertex is moved along the existing bearing to produce exactly the
+	 * target metres; every subsequent vertex in the same sub-segment is
+	 * translated by the same delta so the downstream geometry preserves
+	 * its shape and just shifts.
+	 */
+	function setEdgeLength(segIdx: number, edgeIdx: number, target: number): boolean {
+		if (!Number.isFinite(target) || target < 0.05 || target > 500) return false;
 		const segs = segments();
-		if (activeSegIdx === null) return;
-		const seg = segs[activeSegIdx];
-		if (seg.length < 2) return;
-		const prev = seg[seg.length - 2];
-		const cur = seg[seg.length - 1];
-		const local = lngLatToLocal(cur, prev);
+		const seg = segs[segIdx];
+		if (!seg || edgeIdx < 0 || edgeIdx + 1 >= seg.length) return false;
+
+		const a = seg[edgeIdx];
+		const b = seg[edgeIdx + 1];
+		const local = lngLatToLocal(b, a);
 		const currentLen = Math.hypot(local.x, local.y);
-		if (currentLen < 1e-6) return;
+		if (currentLen < 1e-6) return false;
+
 		const scale = target / currentLen;
-		const newPoint = localToLngLat({ x: local.x * scale, y: local.y * scale }, prev);
+		const newB = localToLngLat({ x: local.x * scale, y: local.y * scale }, a);
+		const dLng = newB[0] - b[0];
+		const dLat = newB[1] - b[1];
+
 		const updated = segs.slice();
-		updated[activeSegIdx] = [...seg.slice(0, -1), newPoint];
+		updated[segIdx] = seg.map((v, i) =>
+			i > edgeIdx ? ([v[0] + dLng, v[1] + dLat] as LngLat) : v
+		);
 		setSegments(updated);
 		scheduleSave();
-		lastSegInput = '';
+		return true;
+	}
+
+	/** Apply the pending value from the side panel for one edge. */
+	function applyEdgeInput(segIdx: number, edgeIdx: number) {
+		const key = `${segIdx}:${edgeIdx}`;
+		const raw = edgeLenInputs[key];
+		if (raw === undefined || raw === '') return;
+		const target = parseFloat(raw);
+		const ok = setEdgeLength(segIdx, edgeIdx, target);
+		if (ok) {
+			edgeLenInputs = { ...edgeLenInputs, [key]: '' };
+			recentlySetEdge = key;
+			setTimeout(() => {
+				if (recentlySetEdge === key) recentlySetEdge = null;
+			}, 1200);
+		}
 	}
 
 	$effect(() => {
@@ -1009,6 +1019,24 @@
 		return haversineMeters(seg[seg.length - 2], seg[seg.length - 1]);
 	});
 
+	/** Render-helpers for the side panel — shape: per-active-wall list of
+	 *  sub-segments, each with edges and lengths. */
+	const sidebarSegments = $derived(() => {
+		const w = activeWall();
+		if (!w) return [] as Array<{ length: number; edges: Array<{ length: number }> }>;
+		const segs = pathToSegments(w.pathGeoJson ?? null);
+		return segs.map((seg) => {
+			const edges: Array<{ length: number }> = [];
+			for (let i = 0; i < seg.length - 1; i++) {
+				edges.push({ length: haversineMeters(seg[i], seg[i + 1]) });
+			}
+			return {
+				length: polylineLengthMeters(seg),
+				edges
+			};
+		});
+	});
+
 	// --- per-wall settings panel ------------------------------------------
 	let settingsOpen = $state(false);
 
@@ -1154,6 +1182,7 @@
 		</section>
 	{/if}
 
+	<div class="layout">
 	<div class="map-frame">
 		<div class="map" bind:this={mapContainer}></div>
 		{#if mapStatus !== 'ready'}
@@ -1210,33 +1239,78 @@
 			{/if}
 		</div>
 
-		{#if tool === 'draw' && activeSegIdx !== null && activeSegLen() >= 2 && activeEndScreenPos}
-			<div
-				class="set-length-popover"
-				style="transform: translate({activeEndScreenPos.x + 18}px, {activeEndScreenPos.y - 28}px)"
-			>
-				<div class="set-length-current">
-					Current: <strong>{lastSegmentLengthM().toFixed(2)} m</strong>
-				</div>
-				<form
-					class="set-length-form"
-					onsubmit={(e) => {
-						e.preventDefault();
-						applyLastSegLen();
-					}}
-				>
-					<input
-						type="number"
-						step="0.01"
-						min="0.1"
-						placeholder="set m"
-						bind:value={lastSegInput}
-						aria-label="Set last segment length in metres"
-					/>
-					<button type="submit" class="btn primary" disabled={!lastSegInput}>Set</button>
-				</form>
+	</div>
+
+	<aside class="walls-panel" aria-label="Walls and segments">
+		<div class="walls-panel-head">
+			<h3>Segments</h3>
+			<span class="muted small">Type a length and hit Enter to set any edge.</span>
+		</div>
+		{#if !activeWall()}
+			<p class="muted small">Draw a wall first, then sub-segments and edges will appear here for fine-tuning.</p>
+		{:else}
+			{@const w = activeWall()!}
+			<div class="active-wall-row">
+				<span class="dot orange"></span>
+				<strong>{w.name}</strong>
+				<span class="muted">{multiPolylineLengthMeters(pathToSegments(w.pathGeoJson ?? null)).toFixed(2)} m</span>
 			</div>
+			{#if sidebarSegments().length === 0}
+				<p class="muted small">No edges yet — drop two points on the map to create your first.</p>
+			{:else}
+				<ol class="seg-list">
+					{#each sidebarSegments() as seg, segIdx (segIdx)}
+						<li class:active-section={segIdx === activeSegIdx}>
+							<header class="seg-head">
+								<span>Section {segIdx + 1}</span>
+								<span class="muted">{seg.length.toFixed(2)} m · {seg.edges.length} edge{seg.edges.length === 1 ? '' : 's'}</span>
+							</header>
+							<ul class="edge-list">
+								{#each seg.edges as edge, edgeIdx (edgeIdx)}
+									{@const key = `${segIdx}:${edgeIdx}`}
+									<li class:recent={recentlySetEdge === key}>
+										<span class="edge-num">E{edgeIdx + 1}</span>
+										<span class="edge-current">{edge.length.toFixed(2)} m</span>
+										<form
+											class="edge-form"
+											onsubmit={(e) => {
+												e.preventDefault();
+												applyEdgeInput(segIdx, edgeIdx);
+											}}
+										>
+											<input
+												type="number"
+												step="0.01"
+												min="0.05"
+												max="500"
+												inputmode="decimal"
+												placeholder="set m"
+												aria-label="Set Section {segIdx + 1} Edge {edgeIdx + 1} length in metres"
+												value={edgeLenInputs[key] ?? ''}
+												oninput={(e) => {
+													edgeLenInputs = {
+														...edgeLenInputs,
+														[key]: (e.currentTarget as HTMLInputElement).value
+													};
+												}}
+											/>
+											<button
+												type="submit"
+												class="btn primary tiny"
+												disabled={!edgeLenInputs[key]}
+											>
+												Set
+											</button>
+										</form>
+									</li>
+								{/each}
+							</ul>
+						</li>
+					{/each}
+				</ol>
+			{/if}
 		{/if}
+	</aside>
 	</div>
 
 	<footer class="summary">
@@ -1477,50 +1551,139 @@
 		margin-left: 0.4rem;
 	}
 
-	.set-length-popover {
-		position: absolute;
-		top: 0;
-		left: 0;
+	.layout {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) 18rem;
+		gap: 1rem;
+		align-items: stretch;
+	}
+	@media (max-width: 880px) {
+		.layout {
+			grid-template-columns: 1fr;
+		}
+	}
+
+	.walls-panel {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+		min-width: 0;
+	}
+	.walls-panel-head {
+		display: flex;
+		flex-direction: column;
+		gap: 0.1rem;
+	}
+	.walls-panel-head h3 {
+		margin: 0;
+		font-size: 0.75rem;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		color: var(--text-muted);
+		font-weight: 600;
+	}
+	.small {
+		font-size: 0.72rem;
+	}
+	.active-wall-row {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		padding: 0.4rem 0.6rem;
+		background: var(--surface);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		font-size: 0.85rem;
+	}
+	.dot {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+	}
+	.dot.orange {
+		background: var(--accent);
+	}
+	.seg-list {
+		list-style: none;
+		padding: 0;
+		margin: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+		max-height: clamp(300px, 50vh, 560px);
+		overflow-y: auto;
+	}
+	.seg-list > li {
+		background: var(--surface);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		padding: 0.5rem 0.6rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.4rem;
+	}
+	.seg-list > li.active-section {
+		border-color: var(--accent);
+	}
+	.seg-head {
+		display: flex;
+		justify-content: space-between;
+		align-items: baseline;
+		gap: 0.5rem;
+		font-size: 0.78rem;
+		font-weight: 600;
+	}
+	.edge-list {
+		list-style: none;
+		padding: 0;
+		margin: 0;
 		display: flex;
 		flex-direction: column;
 		gap: 0.3rem;
-		padding: 0.5rem 0.625rem;
-		background: rgba(11, 11, 12, 0.94);
-		border: 1px solid var(--border);
-		border-radius: 8px;
-		box-shadow: 0 6px 16px rgba(0, 0, 0, 0.55);
-		z-index: 3;
-		font-size: 0.8rem;
-		min-width: 12rem;
 	}
-	.set-length-current {
+	.edge-list li {
+		display: grid;
+		grid-template-columns: 2rem 1fr auto;
+		align-items: center;
+		gap: 0.5rem;
+		padding: 0.25rem 0.3rem;
+		border-radius: 6px;
+		transition: background 0.4s ease;
+	}
+	.edge-list li.recent {
+		background: rgba(74, 209, 101, 0.18);
+	}
+	.edge-num {
+		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+		font-size: 0.72rem;
 		color: var(--text-muted);
 	}
-	.set-length-current strong {
-		color: var(--text);
+	.edge-current {
 		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+		font-size: 0.78rem;
+		color: var(--text);
 	}
-	.set-length-form {
+	.edge-form {
 		display: flex;
-		gap: 0.4rem;
+		gap: 0.3rem;
+		align-items: center;
 	}
-	.set-length-form input {
-		flex: 1;
-		min-width: 0;
-		background: var(--surface);
+	.edge-form input {
+		width: 5rem;
+		background: var(--bg);
 		border: 1px solid var(--border);
 		border-radius: 6px;
-		padding: 0.35rem 0.55rem;
+		padding: 0.25rem 0.4rem;
 		color: var(--text);
-		font-size: 0.85rem;
+		font-size: 0.8rem;
 		outline: none;
 	}
-	.set-length-form input:focus {
+	.edge-form input:focus {
 		border-color: var(--accent);
 	}
-	.set-length-form .btn {
-		padding: 0.35rem 0.7rem;
-		font-size: 0.8rem;
+	.btn.tiny {
+		padding: 0.25rem 0.55rem;
+		font-size: 0.72rem;
 	}
 
 	.tools {
