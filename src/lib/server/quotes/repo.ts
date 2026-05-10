@@ -223,6 +223,57 @@ export async function listQuotesForOrg(opts: { db: DB; orgId: string; limit?: nu
 		.limit(opts.limit ?? 100);
 }
 
+/**
+ * Hard-delete a quote. Cascades to `quote_versions` via the FK's
+ * `ON DELETE CASCADE`. The audit log row is written BEFORE deletion so we
+ * preserve a record of who deleted what — audit_log entries deliberately
+ * outlive their entities for compliance.
+ */
+export async function deleteQuote(opts: {
+	db: DB;
+	orgId: string;
+	userId: string;
+	quoteId: string;
+	ip?: string | null;
+	ua?: string | null;
+}): Promise<{ ok: true } | { ok: false; reason: 'not-found' }> {
+	const { db, orgId, userId, quoteId } = opts;
+
+	const found = await db
+		.select()
+		.from(quotes)
+		.where(and(eq(quotes.id, quoteId), eq(quotes.orgId, orgId)))
+		.limit(1);
+
+	if (found.length === 0) {
+		return { ok: false, reason: 'not-found' };
+	}
+	const quote = found[0];
+
+	await writeAudit({
+		db,
+		orgId,
+		actorUserId: userId,
+		entityType: 'quote',
+		entityId: quoteId,
+		action: 'delete',
+		diff: {
+			quoteNumber: quote.quoteNumber,
+			clientName: quote.clientName,
+			siteAddress: quote.siteAddress,
+			status: quote.status
+		},
+		ip: opts.ip,
+		ua: opts.ua
+	});
+
+	await db
+		.delete(quotes)
+		.where(and(eq(quotes.id, quoteId), eq(quotes.orgId, orgId)));
+
+	return { ok: true };
+}
+
 /** Top-level field paths that changed. Cheap, bounded; full diff is expensive. */
 function computeShallowDiff(prev: QuoteData, next: QuoteData): string[] {
 	const changed: string[] = [];
