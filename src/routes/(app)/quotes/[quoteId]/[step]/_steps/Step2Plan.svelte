@@ -1748,11 +1748,13 @@
 		font-size: 0.72rem;
 	}
 
-	/* Layer-visibility toggles — sit just below the Pan/Draw tools palette. */
+	/* Layer-visibility toggles — sit just below MapLibre's +/- zoom buttons
+	 * on the top-right edge of the map. Keeps the left side clear for the
+	 * Pan/Draw tools palette and avoids overlapping with the active vertex. */
 	.layer-toggles {
 		position: absolute;
-		top: calc(0.6rem + 100px);
-		left: 0.6rem;
+		top: calc(0.6rem + 78px);
+		right: 0.6rem;
 		display: flex;
 		flex-direction: column;
 		gap: 0.2rem;
