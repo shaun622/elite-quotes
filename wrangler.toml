@@ -15,13 +15,10 @@ migrations_dir = "drizzle"
 binding = "CACHE"
 id = "d4f2dea1ef9b4332bae2aae2edc41f1a"
 
-# ----- R2 bucket (PDFs, snapshots) -----
-# Disabled in PR1: R2 needs to be enabled in the Cloudflare dashboard first
-# (Storage & Databases → R2 → Enable; free for the first 10 GB).
-# Re-enable for PR3 when PDF rendering ships:
-# [[r2_buckets]]
-# binding = "FILES"
-# bucket_name = "elite-walls-files"
+# ----- R2 bucket (photos + future PDF storage) -----
+[[r2_buckets]]
+binding = "FILES"
+bucket_name = "elite-walls-files"
 
 # Secrets are set via:  wrangler pages secret put <NAME>
 # Required: BETTER_AUTH_SECRET, RESEND_API_KEY, RESEND_FROM_EMAIL,

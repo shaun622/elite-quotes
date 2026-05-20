@@ -190,6 +190,23 @@ const MetaSchema = z.object({
 export const QUOTE_TYPES = ['residential', 'civil'] as const;
 export type QuoteType = (typeof QUOTE_TYPES)[number];
 
+/**
+ * Site photos uploaded by the estimator on-site. Bytes live in R2 under
+ * `quotes/{quoteId}/photos/{photoId}`; the schema stores only metadata.
+ */
+const PhotoSchema = z.object({
+	id: z.string().min(1),
+	r2Key: z.string().min(1),
+	contentType: z.string().max(120).default('image/jpeg'),
+	label: z.string().max(200).default(''),
+	width: z.number().int().positive().nullable().default(null),
+	height: z.number().int().positive().nullable().default(null),
+	sizeBytes: z.number().int().positive().default(0),
+	uploadedAt: z.number().int().positive().default(() => Date.now())
+});
+
+export type Photo = z.infer<typeof PhotoSchema>;
+
 /** Common wall-type labels — used in the resi "Quick Heights" step. */
 export const RESI_WALL_TYPES = [
 	'Concrete sleeper',
@@ -223,6 +240,7 @@ export const QuoteDataSchema = z.object({
 	client: ClientSchema.default(() => ClientSchema.parse({})),
 	site: SiteSchema.default(() => SiteSchema.parse({})),
 	walls: z.array(WallSchema).default([]),
+	photos: z.array(PhotoSchema).default([]),
 	/** Resi-only quick-fill of the major wall parameters when the user
 	 *  doesn't want to use the full per-post elevation editor. */
 	resiQuick: ResiQuickSchema.default(() => ResiQuickSchema.parse({})),

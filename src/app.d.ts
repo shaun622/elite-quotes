@@ -20,8 +20,7 @@ declare global {
 			env: {
 				DB: D1Database;
 				CACHE: KVNamespace;
-				/** Bound in PR3 when PDF rendering ships — see wrangler.toml. */
-				FILES?: R2Bucket;
+				FILES: R2Bucket;
 				BETTER_AUTH_SECRET: string;
 				RESEND_API_KEY: string;
 				RESEND_FROM_EMAIL: string;

@@ -7,7 +7,14 @@
  * Content-Type and Content-Disposition headers.
  */
 
-import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from 'pdf-lib';
+import {
+	PDFDocument,
+	StandardFonts,
+	rgb,
+	type PDFFont,
+	type PDFImage,
+	type PDFPage
+} from 'pdf-lib';
 import type { Allowance, QuoteData } from '$lib/schemas/quote';
 import { multiPolylineLengthMeters, pathToSegments } from '$lib/wall-math';
 
@@ -31,10 +38,18 @@ const SUCCESS = rgb(0.18, 0.6, 0.32);
 
 export type PdfTemplate = 'client' | 'installer';
 
+export type PdfPhoto = {
+	id: string;
+	contentType: string;
+	bytes: Uint8Array;
+};
+
 export type PdfOptions = {
 	quoteNumber: number;
 	orgName: string;
 	template: PdfTemplate;
+	/** Pre-fetched photo bytes from R2. Embedded into the cover block. */
+	photos?: PdfPhoto[];
 };
 
 export async function renderQuotePdf(
@@ -52,11 +67,31 @@ export async function renderQuotePdf(
 	const bold = await doc.embedFont(StandardFonts.HelveticaBold);
 	const oblique = await doc.embedFont(StandardFonts.HelveticaOblique);
 
+	// Pre-embed photo bytes into the PDF (cap at 4 on the cover block).
+	// pdf-lib supports JPEG and PNG natively; anything else is skipped
+	// silently — iPad camera output is JPEG so this covers the field case.
+	const embeddedPhotos: PDFImage[] = [];
+	for (const p of (opts.photos ?? []).slice(0, 4)) {
+		try {
+			const lower = p.contentType.toLowerCase();
+			if (lower.includes('png')) {
+				embeddedPhotos.push(await doc.embedPng(p.bytes));
+			} else if (lower.includes('jpeg') || lower.includes('jpg')) {
+				embeddedPhotos.push(await doc.embedJpg(p.bytes));
+			}
+			// WebP / HEIC fall through silently — they show in the app but
+			// can't be embedded by pdf-lib. iOS-default JPEG is the common path.
+		} catch {
+			/* unsupported image bytes; skip */
+		}
+	}
+
 	const ctx: Ctx = {
 		doc,
 		page: doc.addPage([PAGE_W, PAGE_H]),
 		fonts: { reg, bold, oblique },
 		opts,
+		images: embeddedPhotos,
 		y: PAGE_H - MARGIN_TOP,
 		pageNum: 1,
 		totalPages: 0 // filled at end
@@ -89,6 +124,7 @@ type Ctx = {
 	page: PDFPage;
 	fonts: { reg: PDFFont; bold: PDFFont; oblique: PDFFont };
 	opts: PdfOptions;
+	images: PDFImage[];
 	y: number;
 	pageNum: number;
 	totalPages: number;
@@ -645,6 +681,7 @@ const CIVIL_EXCLUSIONS = [
 
 function renderResi(ctx: Ctx, data: QuoteData) {
 	renderClientSiteBlock(ctx, data);
+	renderPhotosBlock(ctx);
 	renderScopeBlock(ctx, data);
 	renderQuickHeightsBlock(ctx, data);
 	renderAllowancesTable(ctx, data);
@@ -656,6 +693,7 @@ function renderResi(ctx: Ctx, data: QuoteData) {
 
 function renderCivil(ctx: Ctx, data: QuoteData) {
 	renderClientSiteBlock(ctx, data);
+	renderPhotosBlock(ctx);
 	renderScopeBlock(ctx, data);
 	renderWallSchedule(ctx, data);
 	renderAllowancesTable(ctx, data);
@@ -663,6 +701,55 @@ function renderCivil(ctx: Ctx, data: QuoteData) {
 	renderBullets(ctx, 'Inclusions', CIVIL_INCLUSIONS);
 	renderBullets(ctx, 'Exclusions', CIVIL_EXCLUSIONS);
 	drawTrailingNote(ctx);
+}
+
+function renderPhotosBlock(ctx: Ctx) {
+	if (ctx.images.length === 0) return;
+	drawSectionTitle(ctx, 'Site photos');
+
+	const cellGap = 8;
+	const cols = ctx.images.length === 1 ? 1 : 2;
+	const cellW = (CONTENT_W - cellGap * (cols - 1)) / cols;
+	const cellH = cellW * 0.7; // 10:7 — gives a nice landscape crop
+	const rows = Math.ceil(ctx.images.length / cols);
+	const totalH = rows * cellH + (rows - 1) * cellGap;
+	ensureSpace(ctx, totalH + 4);
+
+	for (let i = 0; i < ctx.images.length; i++) {
+		const img = ctx.images[i];
+		const row = Math.floor(i / cols);
+		const col = i % cols;
+		const x = MARGIN_X + col * (cellW + cellGap);
+		const yTop = ctx.y - row * (cellH + cellGap);
+		const yBottom = yTop - cellH;
+
+		// Fit + centre image inside the cell preserving aspect.
+		const sx = cellW / img.width;
+		const sy = cellH / img.height;
+		const scale = Math.min(sx, sy);
+		const drawW = img.width * scale;
+		const drawH = img.height * scale;
+
+		// Background panel
+		ctx.page.drawRectangle({
+			x,
+			y: yBottom,
+			width: cellW,
+			height: cellH,
+			color: SOFT_BG,
+			borderColor: BORDER,
+			borderWidth: 0.5
+		});
+
+		ctx.page.drawImage(img, {
+			x: x + (cellW - drawW) / 2,
+			y: yBottom + (cellH - drawH) / 2,
+			width: drawW,
+			height: drawH
+		});
+	}
+
+	ctx.y -= totalH;
 }
 
 function renderWallSchedule(ctx: Ctx, data: QuoteData) {

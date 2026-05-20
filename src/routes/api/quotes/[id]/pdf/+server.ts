@@ -2,7 +2,7 @@ import { error } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { makeDb } from '$lib/server/db';
 import { getCurrentVersion } from '$lib/server/quotes/repo';
-import { renderQuotePdf, type PdfTemplate } from '$lib/server/pdf/render';
+import { renderQuotePdf, type PdfPhoto, type PdfTemplate } from '$lib/server/pdf/render';
 
 /**
  * GET /api/quotes/:id/pdf?template=client|installer
@@ -29,10 +29,35 @@ export const GET: RequestHandler = async ({ params, url, locals, platform }) => 
 	});
 	if (!result) error(404, 'Quote not found');
 
+	// Fetch up to 4 photos from R2 in parallel — they'll be embedded on the
+	// cover block of the PDF. Failures are silent; PDF still renders without.
+	const photoBytes: PdfPhoto[] = [];
+	const photosToInclude = result.data.photos.slice(0, 4);
+	if (photosToInclude.length > 0) {
+		const fetched = await Promise.all(
+			photosToInclude.map(async (p) => {
+				try {
+					const obj = await platform.env.FILES.get(p.r2Key);
+					if (!obj) return null;
+					const bytes = new Uint8Array(await obj.arrayBuffer());
+					return {
+						id: p.id,
+						contentType: p.contentType,
+						bytes
+					} satisfies PdfPhoto;
+				} catch {
+					return null;
+				}
+			})
+		);
+		for (const p of fetched) if (p) photoBytes.push(p);
+	}
+
 	const bytes = await renderQuotePdf(result.data, {
 		quoteNumber: result.quote.quoteNumber,
 		orgName: locals.org.name,
-		template
+		template,
+		photos: photoBytes
 	});
 
 	const downloadName = `EW-${result.quote.quoteNumber}${template === 'installer' ? '-installer' : ''}.pdf`;
