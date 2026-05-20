@@ -8,7 +8,7 @@
 		MapMouseEvent,
 		GeoJSONSource
 	} from 'maplibre-gl';
-	import type { QuoteData } from '$lib/schemas/quote';
+	import type { Photo, QuoteData } from '$lib/schemas/quote';
 	import {
 		haversineMeters,
 		lngLatToLocal,
@@ -1136,6 +1136,67 @@
 		w.defaults.concreteStrength = value;
 		scheduleSave();
 	}
+
+	// --- site photos ------------------------------------------------------
+	// Lives on Step 2 (not Step 1) because this is when the estimator is
+	// physically at the property and can take real on-site photos.
+	let photoUploading = $state(false);
+	let photoCount = $state(0);
+	let photoError = $state('');
+
+	async function onPhotoPick(e: Event) {
+		const input = e.currentTarget as HTMLInputElement;
+		const files = input.files;
+		if (!files || files.length === 0) return;
+		photoError = '';
+		photoUploading = true;
+		photoCount = files.length;
+		try {
+			const fd = new FormData();
+			for (const f of files) fd.append('files', f);
+			const res = await fetch(`/api/quotes/${quoteId}/photos`, { method: 'POST', body: fd });
+			if (res.status === 409) {
+				photoError = 'Quote was edited elsewhere — reload to continue.';
+				return;
+			}
+			if (!res.ok) {
+				const body = (await res.json().catch(() => ({}))) as { error?: string };
+				photoError = body.error ?? `Upload failed (${res.status})`;
+				return;
+			}
+			const body = (await res.json()) as {
+				photos: Photo[];
+				dataHash: string;
+				versionNumber: number;
+			};
+			data.photos = body.photos;
+			dataHash = body.dataHash;
+			versionNumber = body.versionNumber;
+		} catch (err) {
+			photoError = err instanceof Error ? err.message : 'Upload failed';
+		} finally {
+			photoUploading = false;
+			photoCount = 0;
+			input.value = '';
+		}
+	}
+
+	async function deletePhoto(id: string) {
+		if (!confirm('Remove this photo?')) return;
+		photoError = '';
+		try {
+			const res = await fetch(`/api/quotes/${quoteId}/photos/${id}`, { method: 'DELETE' });
+			if (!res.ok) {
+				photoError = `Delete failed (${res.status})`;
+				return;
+			}
+			const body = (await res.json()) as { ok: true; dataHash: string };
+			data.photos = data.photos.filter((p) => p.id !== id);
+			dataHash = body.dataHash;
+		} catch (err) {
+			photoError = err instanceof Error ? err.message : 'Delete failed';
+		}
+	}
 </script>
 
 <svelte:window onkeydown={onKey} />
@@ -1193,6 +1254,70 @@
 			</button>
 		</div>
 	</header>
+
+	<section class="photos-strip" aria-label="Site photos">
+		<header class="photos-strip-head">
+			<div>
+				<strong>Site photos</strong>
+				<span class="muted small">
+					{data.photos.length} photo{data.photos.length === 1 ? '' : 's'} · lands on the client PDF
+				</span>
+			</div>
+			<div class="photo-actions">
+				<label class="photo-btn">
+					<input
+						type="file"
+						accept="image/jpeg,image/png,image/webp,image/heic,image/heif"
+						multiple
+						hidden
+						onchange={onPhotoPick}
+						disabled={photoUploading}
+					/>
+					{#if photoUploading}
+						Uploading {photoCount} photo{photoCount === 1 ? '' : 's'}…
+					{:else}
+						+ Add photos
+					{/if}
+				</label>
+				<label class="photo-btn ghost">
+					<input
+						type="file"
+						accept="image/*"
+						capture="environment"
+						hidden
+						onchange={onPhotoPick}
+						disabled={photoUploading}
+					/>
+					📷 Take photo
+				</label>
+			</div>
+		</header>
+		{#if data.photos.length > 0}
+			<ul class="photo-grid">
+				{#each data.photos as p (p.id)}
+					<li>
+						<img
+							src="/api/quotes/{quoteId}/photos/{p.id}"
+							alt={p.label || 'Site photo'}
+							loading="lazy"
+						/>
+						<button
+							type="button"
+							class="photo-rm"
+							onclick={() => deletePhoto(p.id)}
+							aria-label="Remove photo"
+							title="Remove"
+						>
+							×
+						</button>
+					</li>
+				{/each}
+			</ul>
+		{/if}
+		{#if photoError}
+			<p class="photo-err">{photoError}</p>
+		{/if}
+	</section>
 
 	{#if tool === 'draw'}
 		<div class="draw-banner" role="status" aria-live="polite">
@@ -1898,6 +2023,106 @@
 	:global(.vertex-handle:active) {
 		cursor: grabbing;
 	}
+	/* Site photos strip — sits above the draw banner / map. */
+	.photos-strip {
+		background: var(--surface);
+		border: 1px solid var(--border);
+		border-radius: 12px;
+		padding: 0.75rem 0.875rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.625rem;
+	}
+	.photos-strip-head {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		gap: 1rem;
+		flex-wrap: wrap;
+	}
+	.photos-strip-head strong {
+		font-size: 0.95rem;
+	}
+	.photos-strip-head .muted.small {
+		margin-left: 0.5rem;
+	}
+	.photo-actions {
+		display: flex;
+		gap: 0.5rem;
+		flex-wrap: wrap;
+	}
+	.photo-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
+		padding: 0.45rem 0.75rem;
+		background: var(--accent);
+		color: var(--accent-fg);
+		font-size: 0.82rem;
+		font-weight: 600;
+		border-radius: 8px;
+		cursor: pointer;
+		user-select: none;
+	}
+	.photo-btn:hover {
+		filter: brightness(1.05);
+	}
+	.photo-btn.ghost {
+		background: transparent;
+		border: 1px solid var(--border);
+		color: var(--text);
+	}
+	.photo-btn.ghost:hover {
+		border-color: var(--text-muted);
+		filter: none;
+	}
+	.photo-grid {
+		list-style: none;
+		padding: 0;
+		margin: 0;
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(8rem, 1fr));
+		gap: 0.5rem;
+	}
+	.photo-grid li {
+		position: relative;
+		aspect-ratio: 4 / 3;
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		overflow: hidden;
+	}
+	.photo-grid img {
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
+		display: block;
+	}
+	.photo-rm {
+		position: absolute;
+		top: 0.25rem;
+		right: 0.25rem;
+		width: 26px;
+		height: 26px;
+		border-radius: 50%;
+		background: rgba(11, 11, 12, 0.75);
+		border: 1px solid rgba(255, 255, 255, 0.15);
+		color: #fff;
+		font-size: 1rem;
+		line-height: 1;
+		cursor: pointer;
+		padding: 0;
+	}
+	.photo-rm:hover {
+		background: var(--danger);
+		border-color: var(--danger);
+	}
+	.photo-err {
+		color: var(--danger);
+		font-size: 0.78rem;
+		margin: 0;
+	}
+
 	/* Draw banner — full-width strip above the map while the user is in Draw mode. */
 	.draw-banner {
 		display: flex;

@@ -126,8 +126,12 @@
 		justify-content: space-between;
 		gap: 1rem;
 		margin-top: 2rem;
-		padding-top: 1.25rem;
+		padding: 0.875rem 0;
 		border-top: 1px solid var(--border);
+		position: sticky;
+		bottom: 0;
+		background: var(--bg);
+		z-index: 5;
 	}
 	.btn {
 		display: inline-block;

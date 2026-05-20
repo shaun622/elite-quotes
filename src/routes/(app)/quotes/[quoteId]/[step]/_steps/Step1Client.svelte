@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
 	import { untrack } from 'svelte';
-	import type { Photo, QuoteData } from '$lib/schemas/quote';
+	import type { QuoteData } from '$lib/schemas/quote';
 	import type { GeocodeSuggestion } from '$lib/mapbox';
 	// MapLibre is loaded lazily via dynamic import (~700 KB) — see initMap below.
 	import type { Map as MLMap, Marker as MLMarker } from 'maplibre-gl';
@@ -45,65 +45,6 @@
 
 	// svelte-ignore state_referenced_locally
 	let hasGeocode = $state(initialData.site.geocode !== null);
-
-	// --- photos -----------------------------------------------------------
-	let photoUploading = $state(false);
-	let photoCount = $state(0);
-	let photoError = $state('');
-
-	async function onPhotoPick(e: Event) {
-		const input = e.currentTarget as HTMLInputElement;
-		const files = input.files;
-		if (!files || files.length === 0) return;
-		photoError = '';
-		photoUploading = true;
-		photoCount = files.length;
-		try {
-			const fd = new FormData();
-			for (const f of files) fd.append('files', f);
-			const res = await fetch(`/api/quotes/${quoteId}/photos`, { method: 'POST', body: fd });
-			if (res.status === 409) {
-				photoError = 'Quote was edited elsewhere — reload to continue.';
-				return;
-			}
-			if (!res.ok) {
-				const body = (await res.json().catch(() => ({}))) as { error?: string };
-				photoError = body.error ?? `Upload failed (${res.status})`;
-				return;
-			}
-			const body = (await res.json()) as {
-				photos: Photo[];
-				dataHash: string;
-				versionNumber: number;
-			};
-			data.photos = body.photos;
-			dataHash = body.dataHash;
-			versionNumber = body.versionNumber;
-		} catch (err) {
-			photoError = err instanceof Error ? err.message : 'Upload failed';
-		} finally {
-			photoUploading = false;
-			photoCount = 0;
-			input.value = '';
-		}
-	}
-
-	async function deletePhoto(id: string) {
-		if (!confirm('Remove this photo?')) return;
-		photoError = '';
-		try {
-			const res = await fetch(`/api/quotes/${quoteId}/photos/${id}`, { method: 'DELETE' });
-			if (!res.ok) {
-				photoError = `Delete failed (${res.status})`;
-				return;
-			}
-			const body = (await res.json()) as { ok: true; dataHash: string };
-			data.photos = data.photos.filter((p) => p.id !== id);
-			dataHash = body.dataHash;
-		} catch (err) {
-			photoError = err instanceof Error ? err.message : 'Delete failed';
-		}
-	}
 
 	// --- save protocol ------------------------------------------------------
 	let saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -478,73 +419,6 @@
 			</div>
 		{/if}
 
-		<div class="photos full">
-			<header class="photos-head">
-				<span class="photos-title">Site photos</span>
-				<span class="muted small">
-					{data.photos.length} photo{data.photos.length === 1 ? '' : 's'} ·
-					they land on the client PDF
-				</span>
-			</header>
-
-			{#if data.photos.length > 0}
-				<ul class="photo-grid">
-					{#each data.photos as p (p.id)}
-						<li>
-							<img
-								src="/api/quotes/{quoteId}/photos/{p.id}"
-								alt={p.label || 'Site photo'}
-								loading="lazy"
-							/>
-							<button
-								type="button"
-								class="photo-rm"
-								onclick={() => deletePhoto(p.id)}
-								aria-label="Remove photo"
-								title="Remove"
-							>
-								×
-							</button>
-						</li>
-					{/each}
-				</ul>
-			{/if}
-
-			<div class="photo-actions">
-				<label class="photo-btn">
-					<input
-						type="file"
-						accept="image/jpeg,image/png,image/webp,image/heic,image/heif"
-						multiple
-						hidden
-						onchange={onPhotoPick}
-						disabled={photoUploading}
-					/>
-					{#if photoUploading}
-						Uploading {photoCount} photo{photoCount === 1 ? '' : 's'}…
-					{:else if data.photos.length === 0}
-						+ Add photos
-					{:else}
-						+ Add more
-					{/if}
-				</label>
-				<label class="photo-btn ghost">
-					<input
-						type="file"
-						accept="image/*"
-						capture="environment"
-						hidden
-						onchange={onPhotoPick}
-						disabled={photoUploading}
-					/>
-					📷 Take photo
-				</label>
-			</div>
-			{#if photoError}
-				<p class="photo-err">{photoError}</p>
-			{/if}
-		</div>
-
 		<label class="full">
 			<span>Notes</span>
 			<textarea
@@ -742,103 +616,6 @@
 	}
 	.coords {
 		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-	}
-
-	/* photos */
-	.photos {
-		display: flex;
-		flex-direction: column;
-		gap: 0.625rem;
-	}
-	.photos-head {
-		display: flex;
-		align-items: baseline;
-		gap: 0.5rem;
-		justify-content: space-between;
-		flex-wrap: wrap;
-	}
-	.photos-title {
-		font-size: 0.85rem;
-		color: var(--text-muted);
-	}
-	.small {
-		font-size: 0.72rem;
-	}
-	.photo-grid {
-		list-style: none;
-		padding: 0;
-		margin: 0;
-		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(8rem, 1fr));
-		gap: 0.5rem;
-	}
-	.photo-grid li {
-		position: relative;
-		aspect-ratio: 4 / 3;
-		background: var(--surface);
-		border: 1px solid var(--border);
-		border-radius: 8px;
-		overflow: hidden;
-	}
-	.photo-grid img {
-		width: 100%;
-		height: 100%;
-		object-fit: cover;
-		display: block;
-	}
-	.photo-rm {
-		position: absolute;
-		top: 0.25rem;
-		right: 0.25rem;
-		width: 26px;
-		height: 26px;
-		border-radius: 50%;
-		background: rgba(11, 11, 12, 0.75);
-		border: 1px solid rgba(255, 255, 255, 0.15);
-		color: #fff;
-		font-size: 1rem;
-		line-height: 1;
-		cursor: pointer;
-		padding: 0;
-	}
-	.photo-rm:hover {
-		background: var(--danger);
-		border-color: var(--danger);
-	}
-	.photo-actions {
-		display: flex;
-		gap: 0.5rem;
-		flex-wrap: wrap;
-	}
-	.photo-btn {
-		display: inline-flex;
-		align-items: center;
-		gap: 0.4rem;
-		padding: 0.5rem 0.875rem;
-		background: var(--accent);
-		color: var(--accent-fg);
-		font-size: 0.85rem;
-		font-weight: 600;
-		border-radius: 8px;
-		cursor: pointer;
-		user-select: none;
-	}
-	.photo-btn:hover {
-		filter: brightness(1.05);
-	}
-	.photo-btn.ghost {
-		background: transparent;
-		border: 1px solid var(--border);
-		color: var(--text);
-	}
-	.photo-btn.ghost:hover {
-		border-color: var(--text-muted);
-		filter: none;
-	}
-	.photo-err {
-		color: var(--danger);
-		font-size: 0.78rem;
-		margin: 0;
 	}
 
 	.status {
