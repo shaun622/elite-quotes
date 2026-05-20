@@ -14,6 +14,7 @@
 		lngLatToLocal,
 		localToLngLat,
 		multiPolylineLengthMeters,
+		nearestSegment,
 		offsetPolyline,
 		pathToSegments,
 		perpendicularLabelAnchor,
@@ -93,7 +94,7 @@
 				dataHash = fresh.dataHash;
 				versionNumber = fresh.versionNumber;
 				ensureActiveWall();
-				activeSegIdx = null;
+				pendingStart = null;
 				mapVersion++;
 				setTimeout(() => (saveState = 'idle'), 2500);
 				return;
@@ -121,14 +122,18 @@
 	// svelte-ignore state_referenced_locally
 	let activeWallId = $state<string | null>(initialData.walls[0]?.id ?? null);
 
-	/** Index of the sub-segment currently being drawn / extended. Null = "pen up". */
-	let activeSegIdx = $state<number | null>(null);
+	/**
+	 * Drawing model: each click on the map in Draw mode either sets the start
+	 * point or the end point of a new line. After the second click the line
+	 * is committed as a fresh two-vertex sub-segment and the tool snaps back
+	 * to Pan. Refining (drag, double-click insert, double-click delete) works
+	 * on existing sub-segments regardless of which tool is active.
+	 */
+	let pendingStart = $state<LngLat | null>(null);
 
 	/** Top-level interaction tool. Pan = clicks ignored, just navigate.
 	 *  Always defaults to Pan on load — even on a fresh wall — so a stray
-	 *  click while the page is settling doesn't drop a point. The user
-	 *  explicitly switches to Draw, or clicks "+ Add wall" which switches
-	 *  for them because the intent is unambiguous. */
+	 *  click while the page is settling doesn't drop a point. */
 	let tool = $state<Tool>('pan');
 
 	let mapVersion = $state(0);
@@ -148,22 +153,13 @@
 		mapVersion++;
 	}
 
-	function activeSegment(): LngLat[] {
-		const idx = activeSegIdx;
-		if (idx === null) return [];
-		const segs = segments();
-		return segs[idx] ?? [];
-	}
-
 	function ensureActiveWall() {
 		if (data.walls.length === 0) {
 			const wall = newEmptyWall(`Wall 1`);
 			data.walls.push(wall);
 			activeWallId = wall.id;
-			activeSegIdx = null;
 		} else if (!activeWallId || !data.walls.some((w) => w.id === activeWallId)) {
 			activeWallId = data.walls[0].id;
-			activeSegIdx = null;
 		}
 	}
 
@@ -184,7 +180,7 @@
 
 	function selectWall(id: string) {
 		activeWallId = id;
-		activeSegIdx = null;
+		pendingStart = null;
 		mapVersion++;
 	}
 
@@ -192,7 +188,7 @@
 		const next = newEmptyWall(`Wall ${data.walls.length + 1}`);
 		data.walls.push(next);
 		activeWallId = next.id;
-		activeSegIdx = null;
+		pendingStart = null;
 		tool = 'draw';
 		mapVersion++;
 		scheduleSave();
@@ -206,43 +202,41 @@
 			ensureActiveWall();
 		} else if (activeWallId === id) {
 			activeWallId = data.walls[0].id;
-			activeSegIdx = null;
 		}
+		pendingStart = null;
 		mapVersion++;
 		scheduleSave();
 	}
 
-	function undoLastPoint() {
-		const idx = activeSegIdx;
-		if (idx === null) return;
+	/** Undo: if a draw is mid-flight (start clicked, end pending), clear it.
+	 *  Otherwise pop the most-recently added sub-segment. */
+	function undoLast() {
+		if (pendingStart !== null) {
+			pendingStart = null;
+			clearHover();
+			return;
+		}
 		const segs = segments();
-		if (!segs[idx] || segs[idx].length === 0) return;
-		const updated = segs.slice();
-		updated[idx] = updated[idx].slice(0, -1);
-		// If the segment is now empty, drop it.
-		if (updated[idx].length === 0) {
-			updated.splice(idx, 1);
-			activeSegIdx = null;
-		}
-		setSegments(updated);
+		if (segs.length === 0) return;
+		setSegments(segs.slice(0, -1));
 		scheduleSave();
-	}
-
-	function endSegment() {
-		activeSegIdx = null;
-		mapVersion++;
 	}
 
 	function deleteVertex(ref: VertexRef) {
 		const segs = segments();
 		if (!segs[ref.segIdx]) return;
-		const updated = segs.slice();
-		updated[ref.segIdx] = updated[ref.segIdx].filter((_, i) => i !== ref.vertexIdx);
-		if (updated[ref.segIdx].length === 0) {
+		const seg = segs[ref.segIdx];
+		// Refuse to drop below two vertices — a line needs both endpoints to exist.
+		if (seg.length <= 2) {
+			// Two-vertex line: deleting any one vertex means "delete the whole line".
+			const updated = segs.slice();
 			updated.splice(ref.segIdx, 1);
-			if (activeSegIdx === ref.segIdx) activeSegIdx = null;
-			else if (activeSegIdx !== null && activeSegIdx > ref.segIdx) activeSegIdx -= 1;
+			setSegments(updated);
+			scheduleSave();
+			return;
 		}
+		const updated = segs.slice();
+		updated[ref.segIdx] = seg.filter((_, i) => i !== ref.vertexIdx);
 		setSegments(updated);
 		scheduleSave();
 	}
@@ -267,69 +261,48 @@
 		scheduleSave();
 	}
 
-	/** Click an existing vertex → start a new sub-segment branching from it. */
-	function branchFromVertex(ref: VertexRef) {
-		const segs = segments();
-		const v = segs[ref.segIdx]?.[ref.vertexIdx];
-		if (!v) return;
-		const updated = segs.slice();
-		updated.push([v]);
-		setSegments(updated);
-		activeSegIdx = updated.length - 1;
-		scheduleSave();
-	}
-
-	/**
-	 * Click an existing vertex while an in-progress segment is live → extend
-	 * the active segment all the way to that vertex's exact coordinates,
-	 * effectively joining the active run to the existing one.
-	 */
-	function connectActiveToVertex(ref: VertexRef) {
-		if (activeSegIdx === null) return;
-		const segs = segments();
-		const target = segs[ref.segIdx]?.[ref.vertexIdx];
-		if (!target) return;
-		const seg = segs[activeSegIdx] ?? [];
-		const updated = segs.slice();
-		updated[activeSegIdx] = [...seg, target];
-		setSegments(updated);
-		scheduleSave();
-	}
-
 	// --- click logic -------------------------------------------------------
+	/**
+	 * Two-click drawing: first click stores the start, second click commits
+	 * the line as a fresh 2-vertex sub-segment and snaps the tool back to Pan.
+	 * Snap-to-90° kicks in on the second click if the new segment lines up
+	 * within tolerance against the previous most-recent sub-segment's last edge.
+	 */
 	function handleMapClick(lngLat: LngLat) {
-		// Pan tool: clicks ignored. Drag still pans the map natively.
-		if (tool === 'pan') return;
-
+		if (tool !== 'draw') return;
 		const w = activeWall();
 		if (!w) return;
-		const segs = segments();
 
-		if (activeSegIdx === null) {
-			// No active segment → start a new disconnected sub-segment.
-			const updated = segs.slice();
-			updated.push([lngLat]);
-			setSegments(updated);
-			activeSegIdx = updated.length - 1;
-			scheduleSave();
+		if (pendingStart === null) {
+			pendingStart = lngLat;
 			return;
 		}
 
-		// Extend active segment, snapping to 90° if applicable.
-		const seg = segs[activeSegIdx] ?? [];
-		let next: LngLat = lngLat;
-		if (seg.length >= 2) {
+		// Second click — commit the line, with optional snap against the
+		// previous sub-segment if one exists for context.
+		let end: LngLat = lngLat;
+		const segs = segments();
+		const last = segs[segs.length - 1];
+		if (last && last.length >= 2) {
 			const snap = snapAngle({
-				prev: seg[seg.length - 2],
-				pivot: seg[seg.length - 1],
+				prev: last[last.length - 2],
+				pivot: last[last.length - 1],
 				candidate: lngLat
 			});
-			if (snap) next = snap.snapped;
+			if (snap) end = snap.snapped;
 		}
-		const updated = segs.slice();
-		updated[activeSegIdx] = [...seg, next];
+
+		const updated = [...segs, [pendingStart, end] as LngLat[]];
 		setSegments(updated);
+		pendingStart = null;
+		tool = 'pan';
 		scheduleSave();
+	}
+
+	function cancelDraw() {
+		pendingStart = null;
+		tool = 'pan';
+		clearHover();
 	}
 
 	// --- map -----------------------------------------------------------------
@@ -477,6 +450,7 @@
 				m.addSource('wall-segment-labels', { type: 'geojson', data: empty() });
 				m.addSource('snap-hint', { type: 'geojson', data: empty() });
 				m.addSource('hover-ghost', { type: 'geojson', data: empty() });
+				m.addSource('pending-start', { type: 'geojson', data: empty() });
 
 				// Property boundary — solid orange perimeter, slightly translucent fill so
 				// the lot reads at a glance without obscuring the satellite imagery.
@@ -550,13 +524,39 @@
 					}
 				});
 
+				// Pulsing-glow dot at the pending start point during a draw.
+				m.addLayer({
+					id: 'pending-start-glow',
+					source: 'pending-start',
+					type: 'circle',
+					paint: {
+						'circle-color': '#4ad165',
+						'circle-radius': 14,
+						'circle-opacity': 0.35,
+						'circle-blur': 0.6
+					}
+				});
+				m.addLayer({
+					id: 'pending-start-dot',
+					source: 'pending-start',
+					type: 'circle',
+					paint: {
+						'circle-color': '#4ad165',
+						'circle-radius': 7,
+						'circle-stroke-width': 2,
+						'circle-stroke-color': '#ffffff'
+					}
+				});
+
 				// Wall segment labels are now rendered as HTML Markers for the pill look —
 				// see syncSourcesAndMarkers. We keep the empty source around so older
 				// references / future features that want a symbol layer can hook in.
 
+				m.doubleClickZoom.disable();
 				m.on('click', onMapClick);
 				m.on('mousemove', onMapMouseMove);
 				m.on('mouseleave', () => clearHover());
+				m.on('dblclick', onMapDblClick);
 
 				mapInstance = m;
 				mapStatus = 'ready';
@@ -614,45 +614,84 @@
 
 	function onMapMouseMove(e: MapMouseEvent) {
 		if (!mapInstance) return;
-		if (tool === 'pan') {
+		if (tool !== 'draw' || pendingStart === null) {
 			clearHover();
 			return;
 		}
 		const ll: LngLat = [e.lngLat.lng, e.lngLat.lat];
-		const segs = segments();
 
-		if (activeSegIdx !== null) {
-			const seg = segs[activeSegIdx] ?? [];
-			if (seg.length >= 1) {
-				let endPoint: LngLat = ll;
-				let snapHit: ReturnType<typeof snapAngle> = null;
-				if (seg.length >= 2) {
-					snapHit = snapAngle({
-						prev: seg[seg.length - 2],
-						pivot: seg[seg.length - 1],
-						candidate: ll
-					});
-					if (snapHit) endPoint = snapHit.snapped;
-				}
-				setHoverGhost([seg[seg.length - 1], endPoint]);
-				if (snapHit) {
-					snapHintCoords = [seg[seg.length - 1], endPoint];
-					snapHintLabel = `${snapHit.angleDeg}°`;
-					setSnapHint(snapHintCoords);
-				} else {
-					snapHintCoords = null;
-					setSnapHint(null);
-				}
-				return;
-			}
+		// Snap the preview against the previous sub-segment's last edge if there
+		// is one — gives the user a green confirmation that the new line will
+		// land at 0° / 90° / 180° / 270° relative to existing geometry.
+		let endPoint: LngLat = ll;
+		let snapHit: ReturnType<typeof snapAngle> = null;
+		const segs = segments();
+		const last = segs[segs.length - 1];
+		if (last && last.length >= 2) {
+			snapHit = snapAngle({
+				prev: last[last.length - 2],
+				pivot: last[last.length - 1],
+				candidate: ll
+			});
+			if (snapHit) endPoint = snapHit.snapped;
 		}
-		clearHover();
+
+		setHoverGhost([pendingStart, endPoint]);
+		if (snapHit) {
+			snapHintCoords = [pendingStart, endPoint];
+			snapHintLabel = `${snapHit.angleDeg}°`;
+			setSnapHint(snapHintCoords);
+		} else {
+			snapHintCoords = null;
+			setSnapHint(null);
+		}
 	}
 
 	function clearHover() {
 		setHoverGhost(null);
 		setSnapHint(null);
 		snapHintCoords = null;
+	}
+
+	function setPendingStartMarker(coord: LngLat | null) {
+		const src = mapInstance?.getSource('pending-start') as GeoJSONSource | undefined;
+		if (!src) return;
+		src.setData(
+			coord
+				? {
+						type: 'Feature',
+						properties: {},
+						geometry: { type: 'Point', coordinates: coord }
+					}
+				: { type: 'FeatureCollection', features: [] }
+		);
+	}
+
+	/**
+	 * Map double-click → insert a vertex on the closest wall segment if the
+	 * click is within ~1 m of a line. Default MapLibre double-click-zoom is
+	 * disabled to free the gesture for this. Vertex deletion uses dblclick on
+	 * the marker DOM elements (handled inside syncSourcesAndMarkers).
+	 */
+	function onMapDblClick(e: MapMouseEvent) {
+		const target = (e.originalEvent.target as HTMLElement) ?? null;
+		if (target && target.closest('.vertex-handle')) return;
+		const click: LngLat = [e.lngLat.lng, e.lngLat.lat];
+		const w = activeWall();
+		if (!w) return;
+		const segs = pathToSegments(w.pathGeoJson ?? null);
+		let best: { segIdx: number; edgeIdx: number; distM: number } | null = null;
+		for (let si = 0; si < segs.length; si++) {
+			if (segs[si].length < 2) continue;
+			const result = nearestSegment(click, segs[si]);
+			if (!result) continue;
+			if (!best || result.distanceM < best.distM) {
+				best = { segIdx: si, edgeIdx: result.index, distM: result.distanceM };
+			}
+		}
+		if (best && best.distM < 1.5) {
+			insertVertexInSegment(best.segIdx, best.edgeIdx, click);
+		}
 	}
 
 	function setHoverGhost(coords: LngLat[] | null) {
@@ -688,6 +727,13 @@
 		mapVersion;
 		if (!browser || !mapInstance || mapStatus !== 'ready') return;
 		untrack(() => syncSourcesAndMarkers());
+	});
+
+	// --- effect: keep the pending-start dot in sync -----------------------
+	$effect(() => {
+		const ps = pendingStart;
+		if (!browser || !mapInstance || mapStatus !== 'ready') return;
+		untrack(() => setPendingStartMarker(ps));
 	});
 
 	/**
@@ -910,6 +956,8 @@
 		}
 
 		// Vertex markers — every vertex of every sub-segment of the active wall.
+		// Drag = move (always). Double-click = delete. Click during Draw mode
+		// = snap the next clicked point to this vertex's exact coordinates.
 		clearVertexMarkers();
 		if (mlCtors && aWall) {
 			const { Marker } = mlCtors;
@@ -918,9 +966,6 @@
 					const ref: VertexRef = { segIdx, vertexIdx };
 					const el = document.createElement('div');
 					el.className = 'vertex-handle';
-					if (activeSegIdx === segIdx && vertexIdx === seg.length - 1) {
-						el.classList.add('active-end');
-					}
 					const marker = new Marker({ element: el, draggable: true })
 						.setLngLat(c)
 						.addTo(m);
@@ -931,29 +976,14 @@
 					el.addEventListener('click', (e) => {
 						e.stopPropagation();
 						if (tool !== 'draw') return;
-						// Click on the active end itself = "I'm done with this segment".
-						if (
-							activeSegIdx !== null &&
-							ref.segIdx === activeSegIdx &&
-							ref.vertexIdx === (segments()[activeSegIdx]?.length ?? 0) - 1
-						) {
-							endSegment();
-							return;
-						}
-						// Active segment in progress → extend to this vertex (connect).
-						// Otherwise → branch a new sub-segment from this vertex.
-						if (activeSegIdx !== null) {
-							connectActiveToVertex(ref);
-						} else {
-							branchFromVertex(ref);
-						}
-					});
-					el.addEventListener('contextmenu', (e) => {
-						e.preventDefault();
-						if (confirm('Remove this point?')) deleteVertex(ref);
+						// Snap the next draw click to this vertex's exact coords.
+						const segsNow = segments();
+						const v = segsNow[ref.segIdx]?.[ref.vertexIdx];
+						if (v) handleMapClick(v);
 					});
 					el.addEventListener('dblclick', (e) => {
 						e.preventDefault();
+						e.stopPropagation();
 						deleteVertex(ref);
 					});
 					activeVertexMarkers.push(marker);
@@ -967,17 +997,14 @@
 		const tag = (e.target as HTMLElement | null)?.tagName?.toLowerCase();
 		if (tag === 'input' || tag === 'textarea') return;
 		if (e.key === 'v' || e.key === 'V') {
-			tool = 'pan';
+			cancelDraw();
 		} else if (e.key === 'd' || e.key === 'D') {
 			tool = 'draw';
 		} else if (e.key === 'Escape') {
-			endSegment();
+			cancelDraw();
 		} else if ((e.key === 'z' || e.key === 'Z') && (e.ctrlKey || e.metaKey)) {
 			e.preventDefault();
-			undoLastPoint();
-		} else if (e.key === 'Enter' && activeSegIdx !== null && activeSegment().length >= 2) {
-			e.preventDefault();
-			endSegment();
+			undoLast();
 		}
 	}
 
@@ -1060,15 +1087,7 @@
 		return { perWall, total };
 	});
 
-	const activeSegLen = $derived(() => activeSegment().length);
 	const activeWallSegmentCount = $derived(() => segments().length);
-
-	const lastSegmentLengthM = $derived(() => {
-		if (activeSegIdx === null) return 0;
-		const seg = activeSegment();
-		if (seg.length < 2) return 0;
-		return haversineMeters(seg[seg.length - 2], seg[seg.length - 1]);
-	});
 
 	/** Render-helpers for the side panel — shape: per-active-wall list of
 	 *  sub-segments, each with edges and lengths. */
@@ -1155,17 +1174,12 @@
 			<button
 				type="button"
 				class="btn ghost"
-				onclick={undoLastPoint}
-				disabled={activeSegIdx === null || activeSegLen() === 0}
-				title="Undo last point (Ctrl+Z)"
+				onclick={undoLast}
+				disabled={pendingStart === null && activeWallSegmentCount() === 0}
+				title="Undo last action (Ctrl+Z)"
 			>
 				Undo
 			</button>
-			{#if activeSegIdx !== null && activeSegLen() >= 2}
-				<button type="button" class="btn primary" onclick={endSegment} title="End segment (Enter)">
-					End segment
-				</button>
-			{/if}
 			<button
 				type="button"
 				class="btn danger"
@@ -1179,6 +1193,19 @@
 			</button>
 		</div>
 	</header>
+
+	{#if tool === 'draw'}
+		<div class="draw-banner" role="status" aria-live="polite">
+			<span class="draw-banner-dot"></span>
+			<strong>Drawing</strong>
+			<span class="draw-banner-msg">
+				{pendingStart === null
+					? 'Click the start of the line.'
+					: 'Now click the end. Snap to 90° lights up green when it aligns with a previous line.'}
+			</span>
+			<button type="button" class="draw-banner-cancel" onclick={cancelDraw}>Cancel</button>
+		</div>
+	{/if}
 
 	{#if settingsOpen && activeWall()}
 		{@const w = activeWall()!}
@@ -1286,18 +1313,11 @@
 
 		<div class="map-hint">
 			{#if tool === 'pan'}
-				Pan tool — drag to navigate, scroll/pinch to zoom. Switch to Draw to add points.
-			{:else if activeSegIdx === null}
-				{#if activeWallSegmentCount() === 0}
-					Tap the map to drop your first wall point.
-				{:else}
-					Tap to start a new disconnected section, or click an existing point to branch from there.
-				{/if}
-			{:else if activeSegLen() === 1}
-				Tap to add the next point in this section, or click an existing point to connect to it.
+				Pan tool — drag to navigate, scroll/pinch to zoom. Drag a vertex to move it. Double-click a vertex to remove. Double-click the line between vertices to add one.
+			{:else if pendingStart === null}
+				Click the start of the line.
 			{:else}
-				Keep tapping to extend. Click an existing point to <em>connect</em> to it, or hit End segment to start fresh.
-				{#if snapHintLabel}<strong class="snap-tag">snap {snapHintLabel}</strong>{/if}
+				Click the end. {#if snapHintLabel}<strong class="snap-tag">snap {snapHintLabel}</strong>{/if}
 			{/if}
 		</div>
 
@@ -1322,7 +1342,7 @@
 			{:else}
 				<ol class="seg-list">
 					{#each sidebarSegments() as seg, segIdx (segIdx)}
-						<li class:active-section={segIdx === activeSegIdx}>
+						<li>
 							<header class="seg-head">
 								<span>Section {segIdx + 1}</span>
 								<span class="muted">{seg.length.toFixed(2)} m · {seg.edges.length} edge{seg.edges.length === 1 ? '' : 's'}</span>
@@ -1684,9 +1704,6 @@
 		flex-direction: column;
 		gap: 0.4rem;
 	}
-	.seg-list > li.active-section {
-		border-color: var(--accent);
-	}
 	.seg-head {
 		display: flex;
 		justify-content: space-between;
@@ -1881,29 +1898,46 @@
 	:global(.vertex-handle:active) {
 		cursor: grabbing;
 	}
-	:global(.vertex-handle.active-end) {
-		width: 20px;
-		height: 20px;
-		background: #4ad165;
-		border: 3px solid #ffffff;
-		box-shadow:
-			0 0 0 2px rgba(0, 0, 0, 0.55),
-			0 0 14px 4px rgba(74, 209, 101, 0.65);
-		animation: active-end-pulse 1.4s ease-in-out infinite;
-		z-index: 2;
+	/* Draw banner — full-width strip above the map while the user is in Draw mode. */
+	.draw-banner {
+		display: flex;
+		align-items: center;
+		gap: 0.625rem;
+		padding: 0.6rem 0.875rem;
+		background: rgba(74, 209, 101, 0.12);
+		border: 1px solid rgba(74, 209, 101, 0.55);
+		border-radius: 10px;
+		font-size: 0.85rem;
+		color: var(--text);
 	}
-	@keyframes active-end-pulse {
-		0%,
-		100% {
-			box-shadow:
-				0 0 0 2px rgba(0, 0, 0, 0.55),
-				0 0 14px 4px rgba(74, 209, 101, 0.65);
-		}
-		50% {
-			box-shadow:
-				0 0 0 2px rgba(0, 0, 0, 0.55),
-				0 0 22px 8px rgba(74, 209, 101, 0.95);
-		}
+	.draw-banner-dot {
+		width: 10px;
+		height: 10px;
+		border-radius: 50%;
+		background: #4ad165;
+		box-shadow: 0 0 0 3px rgba(74, 209, 101, 0.3);
+		animation: pulse-soft 1.4s ease-in-out infinite;
+	}
+	.draw-banner-msg {
+		color: var(--text);
+		flex: 1;
+		min-width: 0;
+	}
+	.draw-banner-cancel {
+		background: transparent;
+		border: 1px solid var(--border);
+		color: var(--text);
+		padding: 0.35rem 0.7rem;
+		border-radius: 6px;
+		font-size: 0.8rem;
+		cursor: pointer;
+	}
+	.draw-banner-cancel:hover {
+		border-color: var(--text-muted);
+	}
+	@keyframes pulse-soft {
+		0%, 100% { opacity: 1; }
+		50% { opacity: 0.45; }
 	}
 
 	.summary {
