@@ -150,7 +150,43 @@
 		const w = activeWall();
 		if (!w) return;
 		w.pathGeoJson = segmentsToPath(segs);
+		// Keep section-height overrides aligned: pad or trim to the new length.
+		const current = Array.isArray(w.sectionHeightsMm) ? w.sectionHeightsMm : [];
+		const next: (number | null)[] = current.slice(0, segs.length);
+		while (next.length < segs.length) next.push(null);
+		w.sectionHeightsMm = next;
 		mapVersion++;
+	}
+
+	/** Resolve the height in mm to use for the m² calc on a given section.
+	 *  Per-section override wins; falls back to wall default. */
+	function sectionHeightMm(wall: ReturnType<typeof activeWall>, segIdx: number): number {
+		if (!wall) return 0;
+		const override = wall.sectionHeightsMm?.[segIdx];
+		if (typeof override === 'number') return override;
+		return wall.defaults.defaultHeightMm ?? 0;
+	}
+
+	function setSectionHeight(segIdx: number, valueMm: number | null) {
+		const w = activeWall();
+		if (!w) return;
+		const arr = Array.isArray(w.sectionHeightsMm) ? w.sectionHeightsMm.slice() : [];
+		while (arr.length <= segIdx) arr.push(null);
+		arr[segIdx] = valueMm;
+		w.sectionHeightsMm = arr;
+		mapVersion++;
+		scheduleSave();
+	}
+
+	function deleteSection(segIdx: number) {
+		const w = activeWall();
+		if (!w) return;
+		const segs = segments();
+		if (segIdx < 0 || segIdx >= segs.length) return;
+		const updated = segs.slice();
+		updated.splice(segIdx, 1);
+		setSegments(updated);
+		scheduleSave();
 	}
 
 	function ensureActiveWall() {
@@ -169,11 +205,13 @@
 			name,
 			pathGeoJson: null,
 			posts: [],
+			sectionHeightsMm: [],
 			defaults: {
 				boundaryOffsetMm: 100,
 				panelModuleMm: 200,
 				postSpacingMm: 2400,
-				concreteStrength: 'N25' as const
+				concreteStrength: 'N25' as const,
+				defaultHeightMm: 600
 			}
 		};
 	}
@@ -1093,19 +1131,27 @@
 	 *  sub-segments, each with edges and lengths. */
 	const sidebarSegments = $derived(() => {
 		const w = activeWall();
-		if (!w) return [] as Array<{ length: number; edges: Array<{ length: number }> }>;
+		if (!w)
+			return [] as Array<{
+				length: number;
+				heightMm: number;
+				m2: number;
+				edges: Array<{ length: number }>;
+			}>;
 		const segs = pathToSegments(w.pathGeoJson ?? null);
-		return segs.map((seg) => {
+		return segs.map((seg, idx) => {
 			const edges: Array<{ length: number }> = [];
 			for (let i = 0; i < seg.length - 1; i++) {
 				edges.push({ length: haversineMeters(seg[i], seg[i + 1]) });
 			}
-			return {
-				length: polylineLengthMeters(seg),
-				edges
-			};
+			const length = polylineLengthMeters(seg);
+			const heightMm = sectionHeightMm(w, idx);
+			const m2 = length * (heightMm / 1000);
+			return { length, heightMm, m2, edges };
 		});
 	});
+
+	const wallTotalM2 = $derived(() => sidebarSegments().reduce((s, x) => s + x.m2, 0));
 
 	// --- per-wall settings panel ------------------------------------------
 	let settingsOpen = $state(false);
@@ -1460,7 +1506,10 @@
 			<div class="active-wall-row">
 				<span class="dot orange"></span>
 				<strong>{w.name}</strong>
-				<span class="muted">{multiPolylineLengthMeters(pathToSegments(w.pathGeoJson ?? null)).toFixed(2)} m</span>
+				<span class="muted">
+					{multiPolylineLengthMeters(pathToSegments(w.pathGeoJson ?? null)).toFixed(2)} m ·
+					{wallTotalM2().toFixed(2)} m²
+				</span>
 			</div>
 			{#if sidebarSegments().length === 0}
 				<p class="muted small">No edges yet — drop two points on the map to create your first.</p>
@@ -1469,8 +1518,42 @@
 					{#each sidebarSegments() as seg, segIdx (segIdx)}
 						<li>
 							<header class="seg-head">
-								<span>Section {segIdx + 1}</span>
-								<span class="muted">{seg.length.toFixed(2)} m · {seg.edges.length} edge{seg.edges.length === 1 ? '' : 's'}</span>
+								<div class="seg-head-row">
+									<span class="seg-name">Section {segIdx + 1}</span>
+									<button
+										type="button"
+										class="seg-del"
+										onclick={() => {
+											if (confirm(`Delete Section ${segIdx + 1}?`)) deleteSection(segIdx);
+										}}
+										title="Delete this section"
+										aria-label="Delete Section {segIdx + 1}"
+									>
+										×
+									</button>
+								</div>
+								<div class="seg-meta">
+									<span class="muted">{seg.length.toFixed(2)} m</span>
+									<span class="seg-x">×</span>
+									<label class="seg-height" title="Retained height for m² calculation">
+										<input
+											type="number"
+											min="0"
+											max="5000"
+											step="50"
+											inputmode="numeric"
+											value={seg.heightMm}
+											oninput={(e) => {
+												const v = parseInt((e.currentTarget as HTMLInputElement).value, 10);
+												setSectionHeight(segIdx, Number.isFinite(v) ? v : null);
+											}}
+											aria-label="Section {segIdx + 1} height in millimetres"
+										/>
+										<span class="unit">mm</span>
+									</label>
+									<span class="seg-eq">=</span>
+									<strong class="seg-m2">{seg.m2.toFixed(2)} m²</strong>
+								</div>
 							</header>
 							<ul class="edge-list">
 								{#each seg.edges as edge, edgeIdx (edgeIdx)}
@@ -1831,11 +1914,76 @@
 	}
 	.seg-head {
 		display: flex;
-		justify-content: space-between;
-		align-items: baseline;
-		gap: 0.5rem;
+		flex-direction: column;
+		gap: 0.35rem;
 		font-size: 0.78rem;
 		font-weight: 600;
+	}
+	.seg-head-row {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		gap: 0.5rem;
+	}
+	.seg-name {
+		font-weight: 600;
+	}
+	.seg-del {
+		background: transparent;
+		border: 1px solid transparent;
+		color: var(--text-muted);
+		width: 24px;
+		height: 24px;
+		border-radius: 6px;
+		cursor: pointer;
+		font-size: 1.1rem;
+		line-height: 1;
+		padding: 0;
+	}
+	.seg-del:hover {
+		color: var(--danger);
+		border-color: var(--danger);
+	}
+	.seg-meta {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		font-weight: 500;
+		font-size: 0.78rem;
+		flex-wrap: wrap;
+	}
+	.seg-x,
+	.seg-eq {
+		color: var(--text-muted);
+	}
+	.seg-height {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.25rem;
+		font-weight: 500;
+		color: var(--text-muted);
+	}
+	.seg-height input {
+		width: 4rem;
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-radius: 5px;
+		padding: 0.2rem 0.4rem;
+		color: var(--text);
+		font-size: 0.78rem;
+		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+		outline: none;
+	}
+	.seg-height input:focus {
+		border-color: var(--accent);
+	}
+	.seg-height .unit {
+		font-size: 0.7rem;
+		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	}
+	.seg-m2 {
+		color: var(--text);
+		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 	}
 	.edge-list {
 		list-style: none;
