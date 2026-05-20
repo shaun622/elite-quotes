@@ -95,6 +95,12 @@ const WallSchema = z.object({
 
 export type WallPathGeoJson = z.infer<typeof PathGeoJsonSchema>;
 
+/**
+ * Materials kept around for backward compatibility with quotes that were
+ * created before the allowances model existed. New quotes use `allowances`
+ * (see below). The legacy fields fall through to the resi PDF as a single
+ * scope description if `scope` is empty and `allowances` is empty.
+ */
 const MaterialsSchema = z.object({
 	blockType: z.string().default(''),
 	capping: z.string().default(''),
@@ -102,11 +108,72 @@ const MaterialsSchema = z.object({
 	notes: z.string().max(2000).default('')
 });
 
+/**
+ * Allowances — what the quote has been priced for. The boss specifically
+ * wants this on resi quotes so he can show the client "we allowed X, we
+ * actually used Y" when back-charging variations.
+ *
+ * Each row mixes a prefilled `kind` (selected from a known list) with
+ * optional free-text overrides. Free-form custom items use kind: 'custom'.
+ */
+export const ALLOWANCE_KINDS = [
+	'concrete_sleeper',
+	'composite_sleeper',
+	'timber_sleeper',
+	'steel_post',
+	'concrete_pier',
+	'gravel_drainage',
+	'ag_pipe',
+	'geotextile',
+	'fence_bracket',
+	'colourbond_top',
+	'gate_remove',
+	'excavation',
+	'spoil_disposal',
+	'engineer_cert',
+	'mobilisation',
+	'custom'
+] as const;
+
+export type AllowanceKind = (typeof ALLOWANCE_KINDS)[number];
+
+const AllowanceSchema = z.object({
+	id: z.string().min(1),
+	kind: z.enum(ALLOWANCE_KINDS).default('custom'),
+	label: z.string().max(200).default(''),
+	quantity: z.string().max(50).default(''),
+	unit: z.string().max(20).default(''),
+	notes: z.string().max(500).default('')
+});
+
+export type Allowance = z.infer<typeof AllowanceSchema>;
+
+/**
+ * Pricing tiers for the optional "per-height-band" breakdown civil quotes
+ * use (e.g. "Height 0–1.6 m: 120 m² × $374"). Residential defaults to a
+ * single lump-sum or $/lineal-metre and leaves this array empty.
+ */
+const PricingTierSchema = z.object({
+	id: z.string().min(1),
+	label: z.string().max(120).default(''),
+	quantity: z.number().nonnegative().default(0),
+	unit: z.string().max(20).default('m2'),
+	rateCents: z.number().int().nonnegative().default(0)
+});
+
 const PricingSchema = z.object({
+	/** Display mode for the pricing step + PDF. */
+	mode: z.enum(['simple', 'tiered']).default('simple'),
+	/** Simple-mode lump sum (cents) when mode === 'simple'. */
+	lumpSumCents: z.number().int().nonnegative().default(0),
+	/** Tiered-mode line items; sum × rate gives the subtotal. */
+	tiers: z.array(PricingTierSchema).default([]),
+	/** Manually-entered or computed sub-total used for margin/GST math. */
 	subtotalCents: z.number().int().nonnegative().default(0),
 	marginPct: z.number().min(0).max(100).default(20),
 	gstPct: z.number().min(0).max(100).default(10),
 	totalCents: z.number().int().nonnegative().default(0),
+	/** Legacy rates dictionary kept so existing quotes parse. */
 	rates: z.record(z.string(), z.number().nonnegative()).default({})
 });
 
@@ -120,11 +187,46 @@ const MetaSchema = z.object({
 	flags: FlagsSchema.default(() => FlagsSchema.parse({}))
 });
 
+export const QUOTE_TYPES = ['residential', 'civil'] as const;
+export type QuoteType = (typeof QUOTE_TYPES)[number];
+
+/** Common wall-type labels — used in the resi "Quick Heights" step. */
+export const RESI_WALL_TYPES = [
+	'Concrete sleeper',
+	'Composite sleeper',
+	'Timber sleeper',
+	'Block / Versa-Loc',
+	'Boulder',
+	'Other'
+] as const;
+
+const ResiQuickSchema = z.object({
+	/** Max retained height across the whole job, in mm. Drives engineer-cert
+	 *  flagging and the resi PDF cover summary. */
+	maxRetainedMm: z.number().int().nonnegative().default(0),
+	/** Wall type label — free-form but a known list is offered in the UI. */
+	wallType: z.string().max(120).default('Concrete sleeper'),
+	/** Optional 1.5 m Colourbond / similar topping. */
+	topperHeightMm: z.number().int().nonnegative().default(0),
+	topperType: z.string().max(120).default('')
+});
+
 export const QuoteDataSchema = z.object({
 	schemaVersion: z.literal(1).default(1),
+	/** Default residential — the simpler path. Civil unlocks the full
+	 *  elevation editor, BoQ-style pricing, and the longer T&Cs. */
+	quoteType: z.enum(QUOTE_TYPES).default('residential'),
+	/** Free-form scope paragraph that lands verbatim on the resi PDF (e.g.
+	 *  "Featured Concrete sleeper, 28.5 m retaining, 600 mm to 400 mm
+	 *  height, 1.5 m Colourbond on top, remove + dump double gate"). */
+	scope: z.string().max(4000).default(''),
 	client: ClientSchema.default(() => ClientSchema.parse({})),
 	site: SiteSchema.default(() => SiteSchema.parse({})),
 	walls: z.array(WallSchema).default([]),
+	/** Resi-only quick-fill of the major wall parameters when the user
+	 *  doesn't want to use the full per-post elevation editor. */
+	resiQuick: ResiQuickSchema.default(() => ResiQuickSchema.parse({})),
+	allowances: z.array(AllowanceSchema).default([]),
 	materials: MaterialsSchema.default(() => MaterialsSchema.parse({})),
 	pricing: PricingSchema.default(() => PricingSchema.parse({})),
 	meta: MetaSchema.default(() => MetaSchema.parse({}))

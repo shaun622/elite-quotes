@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
+	import type { QuoteType } from '$lib/schemas/quote';
 	import ProgressBar, { type Step } from './ProgressBar.svelte';
 
 	let {
@@ -7,12 +8,16 @@
 		current,
 		steps,
 		quoteNumber,
+		quoteType = 'residential',
+		onTypeChange,
 		children
 	}: {
 		quoteId: string;
 		current: number;
 		steps: Step[];
 		quoteNumber: number;
+		quoteType?: QuoteType;
+		onTypeChange?: (next: QuoteType) => void;
 		children?: Snippet;
 	} = $props();
 
@@ -31,8 +36,21 @@
 		<div class="trail">
 			<a href="/quotes">Quotes</a>
 			<span aria-hidden="true">›</span>
-			<span>Quote #{quoteNumber}</span>
+			<span>Quote EW-{quoteNumber}</span>
 		</div>
+		{#if onTypeChange}
+			<label class="type-toggle">
+				<span class="type-toggle-label">Type</span>
+				<select
+					value={quoteType}
+					onchange={(e) =>
+						onTypeChange?.((e.currentTarget as HTMLSelectElement).value as QuoteType)}
+				>
+					<option value="residential">Residential</option>
+					<option value="civil">Civil</option>
+				</select>
+			</label>
+		{/if}
 	</header>
 
 	<div class="step-body">
@@ -60,13 +78,42 @@
 		padding: 1.5rem 1.25rem 6rem;
 	}
 	.step-head {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		gap: 1rem;
 		margin-bottom: 1.25rem;
+		flex-wrap: wrap;
 	}
 	.trail {
 		display: flex;
 		gap: 0.5rem;
 		font-size: 0.8rem;
 		color: var(--text-muted);
+	}
+	.type-toggle {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.5rem;
+		font-size: 0.75rem;
+		color: var(--text-muted);
+	}
+	.type-toggle-label {
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		font-weight: 600;
+	}
+	.type-toggle select {
+		background: var(--surface);
+		border: 1px solid var(--border);
+		color: var(--text);
+		padding: 0.3rem 0.55rem;
+		border-radius: 6px;
+		font-size: 0.85rem;
+		outline: none;
+	}
+	.type-toggle select:focus {
+		border-color: var(--accent);
 	}
 	.trail a {
 		color: var(--text-muted);

@@ -73,11 +73,11 @@
 						class:deleting={pendingDeleteId === q.id}
 						tabindex="0"
 						role="button"
-						aria-label="Open Quote #{q.quoteNumber}"
+						aria-label="Open Quote EW-{q.quoteNumber}"
 						onclick={(e) => onRowClick(e, q.id)}
 						onkeydown={(e) => onRowKey(e, q.id)}
 					>
-						<td><a href="/quotes/{q.id}/1" tabindex="-1">{q.quoteNumber}</a></td>
+						<td><a href="/quotes/{q.id}/1" tabindex="-1">EW-{q.quoteNumber}</a></td>
 						<td>{q.clientName ?? '—'}</td>
 						<td>{q.siteAddress ?? '—'}</td>
 						<td><span class="badge {q.status}">{q.status}</span></td>
@@ -90,7 +90,7 @@
 								use:enhance={({ cancel }) => {
 									if (
 										!confirm(
-											`Delete Quote #${q.quoteNumber}${q.clientName ? ` for ${q.clientName}` : ''}?\n\nThis permanently removes the quote and all its versions. The audit log entry is preserved.`
+											`Delete Quote EW-${q.quoteNumber}${q.clientName ? ` for ${q.clientName}` : ''}?\n\nThis permanently removes the quote and all its versions. The audit log entry is preserved.`
 										)
 									) {
 										cancel();
@@ -116,7 +116,7 @@
 									type="submit"
 									class="delete-btn"
 									title="Delete quote"
-									aria-label="Delete Quote #{q.quoteNumber}"
+									aria-label="Delete Quote EW-{q.quoteNumber}"
 									disabled={pendingDeleteId === q.id}
 								>
 									{#if pendingDeleteId === q.id}
