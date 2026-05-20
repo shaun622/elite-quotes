@@ -143,9 +143,26 @@
 	</section>
 
 	<section class="card actions">
-		<button class="btn-primary" disabled type="button">Generate client PDF</button>
-		<button class="btn-secondary" disabled type="button">Generate installer take-off</button>
-		<p class="muted small">PDF templates and the Push-to-Xero option ship in the next PR.</p>
+		<a
+			class="btn-primary"
+			href="/api/quotes/{quoteId}/pdf?template=client"
+			target="_blank"
+			rel="noopener"
+		>
+			Generate client PDF
+		</a>
+		<a
+			class="btn-secondary"
+			href="/api/quotes/{quoteId}/pdf?template=installer"
+			target="_blank"
+			rel="noopener"
+		>
+			Generate installer take-off
+		</a>
+		<p class="muted small">
+			Opens in a new tab and downloads. The installer take-off is the same layout minus pricing.
+			Push-to-Xero ships in a follow-up.
+		</p>
 	</section>
 </div>
 
