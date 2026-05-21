@@ -21,12 +21,11 @@
 		children?: Snippet;
 	} = $props();
 
-	// Wizard step is fixed for the lifetime of this component instance —
-	// route navigation re-mounts it with fresh props. No reactivity needed.
-	// svelte-ignore state_referenced_locally
-	const prevN = current > 1 ? current - 1 : null;
-	// svelte-ignore state_referenced_locally
-	const nextN = current < steps.length ? current + 1 : null;
+	// Re-derive on every prop change so navigating between steps without
+	// remounting (which is what SvelteKit does when only the [step] param
+	// changes) updates the Back / Continue links correctly.
+	const prevN = $derived(current > 1 ? current - 1 : null);
+	const nextN = $derived(current < steps.length ? current + 1 : null);
 </script>
 
 <ProgressBar {quoteId} {current} {steps} />
