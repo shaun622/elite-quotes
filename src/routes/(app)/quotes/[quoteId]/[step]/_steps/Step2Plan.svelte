@@ -1260,25 +1260,60 @@
 			// last vertex of every section. End[i] = Start[i+1] by the chain,
 			// so labelling only ends after the first section gives a clean
 			// one-pill-per-junction effect.
+			//
+			// Each pill is offset PERPENDICULAR to the wall's local direction
+			// by ~2.5 m so it sits beside the vertex instead of on top of
+			// it — the boss flagged that on-vertex pills blocked the vertex
+			// handle and made the endpoint impossible to pinpoint.
+			const GROUND_PILL_OFFSET_M = 2.5;
+			const offsetPerpFromVertex = (
+				vertex: LngLat,
+				edgeOther: LngLat,
+				offsetMeters: number
+			): LngLat => {
+				const lo = lngLatToLocal(edgeOther, vertex);
+				const len = Math.hypot(lo.x, lo.y) || 1;
+				// Left-hand normal of vertex→edgeOther direction.
+				const nx = -lo.y / len;
+				const ny = lo.x / len;
+				return localToLngLat({ x: nx * offsetMeters, y: ny * offsetMeters }, vertex);
+			};
+
 			if (aWall && aSegments.length > 0) {
 				for (let i = 0; i < aSegments.length; i++) {
 					const seg = aSegments[i];
 					if (seg.length < 2) continue;
 					if (i === 0) {
 						const startMm = sectionStartMm(aWall, 0);
+						// First vertex offset: perpendicular to the section's
+						// first edge (vertex 0 → vertex 1).
+						const anchor = offsetPerpFromVertex(
+							seg[0],
+							seg[1],
+							GROUND_PILL_OFFSET_M
+						);
 						addLabelMarker({
 							map: m,
 							Marker,
-							lngLat: seg[0],
+							lngLat: anchor,
 							text: `${Math.round(startMm)} mm`,
 							kind: 'ground'
 						});
 					}
 					const endMm = sectionEndMm(aWall, i);
+					// End vertex offset: perpendicular to the section's LAST
+					// edge (vertex n-1 → vertex n, computed by passing the
+					// "other" vertex so the direction matches travel).
+					const lastIdx = seg.length - 1;
+					const anchor = offsetPerpFromVertex(
+						seg[lastIdx],
+						seg[lastIdx - 1],
+						GROUND_PILL_OFFSET_M
+					);
 					addLabelMarker({
 						map: m,
 						Marker,
-						lngLat: seg[seg.length - 1],
+						lngLat: anchor,
 						text: `${Math.round(endMm)} mm`,
 						kind: 'ground'
 					});
