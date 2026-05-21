@@ -144,6 +144,11 @@
 
 	let mapVersion = $state(0);
 
+	/** Set while a vertex marker is being actively dragged. Tracked so any
+	 *  reactive sync that fires mid-drag knows to leave the dragging marker
+	 *  alone — destroying it mid-gesture cancels the drag. */
+	let dragging = $state(false);
+
 	function activeWall() {
 		return data.walls.find((w) => w.id === activeWallId);
 	}
@@ -1025,6 +1030,10 @@
 	$effect(() => {
 		mapVersion;
 		if (!browser || !mapInstance || mapStatus !== 'ready') return;
+		// If a drag is in flight, the drag handler is already keeping the
+		// sources and labels live. Any incidental re-sync here would clear
+		// and re-create the dragging marker mid-gesture and break the drag.
+		if (dragging) return;
 		untrack(() => syncSourcesAndMarkers());
 	});
 
@@ -1107,7 +1116,16 @@
 		if (t === 'pan') untrack(() => clearHover());
 	});
 
-	function syncSourcesAndMarkers() {
+	/**
+	 * Live drag is the key reason this function takes `skipVertexMarkers`.
+	 * While the user is dragging a vertex, MapLibre is actively moving that
+	 * marker DOM element; if we clear and re-create vertex markers during
+	 * each drag frame, the dragging marker gets destroyed mid-gesture and
+	 * the drag breaks. So we update the line sources and labels (which the
+	 * user expects to follow live) but leave the vertex marker layer alone
+	 * until the drag ends.
+	 */
+	function syncSourcesAndMarkers(opts: { skipVertexMarkers?: boolean } = {}) {
 		if (!mapInstance) return;
 		const m = mapInstance;
 		const aId = activeWallId;
@@ -1327,6 +1345,9 @@
 		// Vertex markers — every vertex of every sub-segment of the active wall.
 		// Drag = move (always). Double-click = delete. Click during Draw mode
 		// = snap the next clicked point to this vertex's exact coordinates.
+		// Skipped during a live drag so we don't destroy the dragging marker
+		// mid-gesture (see opts comment on syncSourcesAndMarkers).
+		if (opts.skipVertexMarkers) return;
 		clearVertexMarkers();
 		if (mlCtors && aWall) {
 			const { Marker } = mlCtors;
@@ -1338,8 +1359,32 @@
 					const marker = new Marker({ element: el, draggable: true })
 						.setLngLat(c)
 						.addTo(m);
-					marker.on('dragend', () => {
+
+					// Live drag — fires on every cursor frame. Update the
+					// wall's pathGeoJson directly (no mapVersion bump, no
+					// scheduleSave) and re-render lines + labels so the user
+					// sees the geometry follow their cursor in real time.
+					marker.on('dragstart', () => {
+						dragging = true;
+					});
+					marker.on('drag', () => {
 						const ll = marker.getLngLat();
+						const aw = activeWall();
+						if (!aw) return;
+						const segsLive = pathToSegments(aw.pathGeoJson ?? null);
+						if (!segsLive[ref.segIdx] || !segsLive[ref.segIdx][ref.vertexIdx]) return;
+						segsLive[ref.segIdx] = segsLive[ref.segIdx].slice();
+						segsLive[ref.segIdx][ref.vertexIdx] = [ll.lng, ll.lat];
+						aw.pathGeoJson = segmentsToPath(segsLive);
+						// Sources + labels follow the cursor; vertex marker
+						// stays intact so the drag gesture isn't interrupted.
+						syncSourcesAndMarkers({ skipVertexMarkers: true });
+					});
+					marker.on('dragend', () => {
+						dragging = false;
+						const ll = marker.getLngLat();
+						// Full commit — bumps mapVersion (triggers proper
+						// vertex marker refresh) and schedules the save.
 						moveVertex(ref, [ll.lng, ll.lat]);
 					});
 					el.addEventListener('click', (e) => {
