@@ -549,8 +549,6 @@
 	}
 	// svelte-ignore state_referenced_locally
 	let showBoundary = $state(readToggle('eq.step2.showBoundary', true));
-	// svelte-ignore state_referenced_locally
-	let showLabels = $state(readToggle('eq.step2.showLabels', true));
 
 	$effect(() => {
 		const v = showBoundary;
@@ -562,13 +560,18 @@
 		}
 	});
 
+	// Defensive cleanup: an earlier release had a "Labels" master toggle
+	// that some users left switched off. We removed the toggle (labels are
+	// now always visible) but the stale `0` is still in their localStorage
+	// shadowing the default — and the old global CSS rule would still hide
+	// them if it ever came back. Wipe the key so reloads return to the
+	// always-on default.
 	$effect(() => {
-		const v = showLabels;
 		if (!browser) return;
 		try {
-			localStorage.setItem('eq.step2.showLabels', v ? '1' : '0');
+			localStorage.removeItem('eq.step2.showLabels');
 		} catch {
-			/* private mode or quota — fail silently */
+			/* private mode — fine */
 		}
 	});
 
@@ -2000,7 +2003,7 @@
 		{/if}
 	</aside>
 
-	<div class="map-frame" class:hide-labels={!showLabels}>
+	<div class="map-frame">
 		<div class="map" bind:this={mapContainer}></div>
 		{#if mapStatus !== 'ready'}
 			<div class="map-loading">Loading satellite…</div>
@@ -2010,10 +2013,6 @@
 			<label>
 				<input type="checkbox" bind:checked={showBoundary} />
 				<span>Boundary</span>
-			</label>
-			<label>
-				<input type="checkbox" bind:checked={showLabels} />
-				<span>Labels</span>
 			</label>
 		</div>
 
@@ -2893,25 +2892,23 @@
 		line-height: 1;
 	}
 
-	/* The Labels toggle removes every length pill in one go via this class. */
-	:global(.map-frame.hide-labels .edge-label) {
-		display: none !important;
-	}
-
 	/* Pill-style map labels rendered via MapLibre Markers. The base style
 	 * sets typography + a solid drop shadow so every pill reads cleanly
 	 * against any satellite tile. Each kind layers its own colour scheme. */
 	:global(.edge-label) {
 		font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-		font-size: 12px;
+		font-size: 14px;
 		font-weight: 700;
 		font-variant-numeric: tabular-nums;
-		padding: 3px 8px;
+		padding: 4px 10px;
 		border-radius: 999px;
 		white-space: nowrap;
 		pointer-events: none;
 		user-select: none;
-		box-shadow: 0 1px 4px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(0, 0, 0, 0.25);
+		/* Double shadow — soft drop + 1-px outline — so the pill stands
+		 * proud against both light (grass / pale roofs) and dark (shaded
+		 * trees / asphalt) satellite tiles without an explicit border. */
+		box-shadow: 0 2px 6px rgba(0, 0, 0, 0.6), 0 0 0 1.5px rgba(0, 0, 0, 0.35);
 		letter-spacing: 0.01em;
 	}
 	:global(.edge-label--wall-active) {
@@ -2919,32 +2916,32 @@
 		color: #1a0f00;
 	}
 	:global(.edge-label--wall-other) {
-		background: rgba(255, 138, 28, 0.6);
+		background: rgba(255, 138, 28, 0.65);
 		color: #1a0f00;
 	}
 	:global(.edge-label--boundary) {
-		background: rgba(11, 11, 12, 0.88);
+		background: rgba(11, 11, 12, 0.92);
 		color: #ffffff;
-		border: 1px solid rgba(255, 138, 28, 0.8);
+		border: 1px solid rgba(255, 138, 28, 0.9);
 	}
 	:global(.edge-label--offset) {
-		background: rgba(11, 11, 12, 0.92);
+		background: rgba(11, 11, 12, 0.94);
 		color: #c8efb1;
-		border: 1px solid rgba(127, 217, 154, 0.85);
-		font-size: 10px;
-		padding: 2px 6px;
+		border: 1px solid rgba(127, 217, 154, 0.9);
+		font-size: 11px;
+		padding: 3px 7px;
 	}
 	/* Wall name pill — red like the reference's "W1" / "W2" badges. Sits
 	 * on the wall centroid so it identifies the wall at a glance. */
 	:global(.edge-label--wall-name) {
 		background: #d94c4c;
 		color: #fff;
-		font-size: 12px;
+		font-size: 13px;
 		font-weight: 800;
-		padding: 4px 10px;
-		letter-spacing: 0.04em;
+		padding: 5px 12px;
+		letter-spacing: 0.05em;
 		text-transform: uppercase;
-		box-shadow: 0 1px 5px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(0, 0, 0, 0.3);
+		box-shadow: 0 2px 7px rgba(0, 0, 0, 0.65), 0 0 0 1.5px rgba(0, 0, 0, 0.4);
 	}
 	/* Ground-level pill — green to match the Step 2 sidebar height inputs
 	 * and Step 3's reseed action. One pill per section-endpoint on the
@@ -2952,10 +2949,10 @@
 	:global(.edge-label--ground) {
 		background: #2e8c4a;
 		color: #fff;
-		font-size: 11px;
+		font-size: 12px;
 		font-weight: 700;
-		padding: 3px 8px;
-		border: 1px solid rgba(255, 255, 255, 0.2);
+		padding: 4px 10px;
+		border: 1px solid rgba(255, 255, 255, 0.25);
 	}
 
 	:global(.vertex-handle) {
