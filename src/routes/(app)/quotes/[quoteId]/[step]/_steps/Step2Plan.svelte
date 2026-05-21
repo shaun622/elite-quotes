@@ -1824,109 +1824,138 @@
 							role="button"
 							tabindex="0"
 						>
-							<header class="seg-head">
-								<div class="seg-head-row">
+							<header class="seg-card-head">
+								<div class="seg-name-row">
 									<span class="seg-name">Section {segIdx + 1}</span>
-									<span class="seg-len-tag">{seg.length.toFixed(2)} m</span>
 									<button
 										type="button"
-										class="seg-del"
-										onclick={() => {
+										class="seg-del-icon"
+										onclick={(e) => {
+											e.stopPropagation();
 											if (confirm(`Delete Section ${segIdx + 1}?`)) deleteSection(segIdx);
 										}}
 										title="Delete this section"
 										aria-label="Delete Section {segIdx + 1}"
 									>
-										×
+										✕
 									</button>
 								</div>
-								<div class="seg-heights" title="Retained ground heights along this section">
-									<label class="seg-height start" title="Height at start of section">
-										<span class="seg-height-label">Start</span>
-										<input
-											type="number"
-											min="0"
-											max="5000"
-											step="50"
-											inputmode="numeric"
-											value={seg.startMm}
-											oninput={(e) => {
-												const v = parseInt((e.currentTarget as HTMLInputElement).value, 10);
-												setSectionStartHeight(segIdx, Number.isFinite(v) ? v : null);
-											}}
-											aria-label="Section {segIdx + 1} start height in millimetres"
-										/>
-										<span class="unit">mm</span>
-									</label>
-									<span class="seg-arrow" aria-hidden="true">→</span>
-									<label class="seg-height end" title="Height at end of section (= start of next section)">
-										<span class="seg-height-label">End</span>
-										<input
-											type="number"
-											min="0"
-											max="5000"
-											step="50"
-											inputmode="numeric"
-											value={seg.endMm}
-											oninput={(e) => {
-												const v = parseInt((e.currentTarget as HTMLInputElement).value, 10);
-												setSectionEndHeight(segIdx, Number.isFinite(v) ? v : null);
-											}}
-											aria-label="Section {segIdx + 1} end height in millimetres"
-										/>
-										<span class="unit">mm</span>
-									</label>
-									{#if segIdx + 1 < sidebarSegments().length}
-										<span class="chain-hint" title="End of this section equals start of Section {segIdx + 2}">⇌</span>
-									{/if}
-								</div>
-								<div class="seg-area">
-									<span class="muted small">
-										avg {Math.round(seg.avgMm)} mm × {seg.length.toFixed(2)} m
-									</span>
-									<strong class="seg-m2">{seg.m2.toFixed(2)} m²</strong>
+								<div class="seg-headline">
+									<span class="seg-headline-num">{seg.length.toFixed(2)}<span class="seg-headline-unit"> m</span></span>
+									<span class="seg-headline-sep">·</span>
+									<span class="seg-headline-num">{seg.m2.toFixed(2)}<span class="seg-headline-unit"> m²</span></span>
 								</div>
 							</header>
-							<ul class="edge-list">
-								{#each seg.edges as edge, edgeIdx (edgeIdx)}
-									{@const key = `${segIdx}:${edgeIdx}`}
-									<li class:recent={recentlySetEdge === key}>
-										<span class="edge-num">E{edgeIdx + 1}</span>
-										<span class="edge-current">{edge.length.toFixed(2)} m</span>
-										<form
-											class="edge-form"
-											onsubmit={(e) => {
-												e.preventDefault();
-												applyEdgeInput(segIdx, edgeIdx);
-											}}
-										>
+
+							<section class="seg-group ground" aria-label="Ground levels for Section {segIdx + 1}">
+								<h4 class="seg-group-title">
+									<span class="seg-group-dot ground"></span>
+									Ground levels
+								</h4>
+								<div class="seg-heights">
+									<label class="seg-height start">
+										<span class="seg-height-label">Start</span>
+										<div class="seg-height-input">
 											<input
 												type="number"
-												step="0.01"
-												min="0.05"
-												max="500"
-												inputmode="decimal"
-												placeholder="set m"
-												aria-label="Set Section {segIdx + 1} Edge {edgeIdx + 1} length in metres"
-												value={edgeLenInputs[key] ?? ''}
+												min="0"
+												max="5000"
+												step="50"
+												inputmode="numeric"
+												value={seg.startMm}
 												oninput={(e) => {
-													edgeLenInputs = {
-														...edgeLenInputs,
-														[key]: (e.currentTarget as HTMLInputElement).value
-													};
+													const v = parseInt((e.currentTarget as HTMLInputElement).value, 10);
+													setSectionStartHeight(segIdx, Number.isFinite(v) ? v : null);
 												}}
+												aria-label="Section {segIdx + 1} start ground level in millimetres"
 											/>
-											<button
-												type="submit"
-												class="btn primary tiny"
-												disabled={!edgeLenInputs[key]}
+											<span class="unit">mm</span>
+										</div>
+									</label>
+									<span class="seg-heights-arrow" aria-hidden="true">→</span>
+									<label class="seg-height end">
+										<span class="seg-height-label">End</span>
+										<div class="seg-height-input">
+											<input
+												type="number"
+												min="0"
+												max="5000"
+												step="50"
+												inputmode="numeric"
+												value={seg.endMm}
+												oninput={(e) => {
+													const v = parseInt((e.currentTarget as HTMLInputElement).value, 10);
+													setSectionEndHeight(segIdx, Number.isFinite(v) ? v : null);
+												}}
+												aria-label="Section {segIdx + 1} end ground level in millimetres"
+											/>
+											<span class="unit">mm</span>
+										</div>
+									</label>
+								</div>
+								{#if segIdx + 1 < sidebarSegments().length}
+									<p class="chain-caption">
+										<span class="chain-glyph" aria-hidden="true">⇌</span>
+										End linked to Section {segIdx + 2} start — edit one, both update.
+									</p>
+								{/if}
+							</section>
+
+							<section class="seg-group length" aria-label="Wall length for Section {segIdx + 1}">
+								<h4 class="seg-group-title">
+									<span class="seg-group-dot length"></span>
+									Wall length
+								</h4>
+								<ul class="edge-list">
+									{#each seg.edges as edge, edgeIdx (edgeIdx)}
+										{@const key = `${segIdx}:${edgeIdx}`}
+										{@const showLabel = seg.edges.length > 1}
+										<li class:recent={recentlySetEdge === key}>
+											<div class="edge-current-row">
+												{#if showLabel}
+													<span class="edge-num">Edge {edgeIdx + 1}</span>
+												{:else}
+													<span class="edge-num">Current</span>
+												{/if}
+												<strong class="edge-current">{edge.length.toFixed(2)} m</strong>
+											</div>
+											<form
+												class="edge-form"
+												onsubmit={(e) => {
+													e.preventDefault();
+													applyEdgeInput(segIdx, edgeIdx);
+												}}
 											>
-												Set
-											</button>
-										</form>
-									</li>
-								{/each}
-							</ul>
+												<label class="edge-set-label" for="edge-set-{key}">Set to</label>
+												<input
+													id="edge-set-{key}"
+													type="number"
+													step="0.01"
+													min="0.05"
+													max="500"
+													inputmode="decimal"
+													placeholder="metres"
+													aria-label="Set Section {segIdx + 1} {showLabel ? `Edge ${edgeIdx + 1}` : ''} length in metres"
+													value={edgeLenInputs[key] ?? ''}
+													oninput={(e) => {
+														edgeLenInputs = {
+															...edgeLenInputs,
+															[key]: (e.currentTarget as HTMLInputElement).value
+														};
+													}}
+												/>
+												<button
+													type="submit"
+													class="btn primary tiny"
+													disabled={!edgeLenInputs[key]}
+												>
+													Set
+												</button>
+											</form>
+										</li>
+									{/each}
+								</ul>
+							</section>
 						</li>
 					{/each}
 				</ol>
@@ -2222,74 +2251,6 @@
 		height: 2px;
 	}
 
-	/* Tighter Section length tag in the sidebar — reads as a small chip next
-	 * to the section name. */
-	.seg-len-tag {
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-size: 0.72rem;
-		color: var(--text-muted);
-		background: rgba(255, 255, 255, 0.04);
-		padding: 0.05rem 0.35rem;
-		border-radius: 4px;
-		margin-right: auto;
-		margin-left: 0.4rem;
-	}
-
-	/* Chained start/end heights — green-tinted to make them visually stand
-	 * out from generic numeric inputs. Boss feedback: "make heights stand out
-	 * with green or something". */
-	.seg-heights {
-		display: flex;
-		align-items: center;
-		gap: 0.35rem;
-		flex-wrap: wrap;
-	}
-	.seg-arrow {
-		color: #7fd99a;
-		font-weight: 700;
-		font-size: 0.85rem;
-	}
-	.chain-hint {
-		color: #7fd99a;
-		font-weight: 700;
-		font-size: 0.85rem;
-		margin-left: 0.15rem;
-		opacity: 0.9;
-	}
-	.seg-height-label {
-		font-size: 0.65rem;
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		font-weight: 700;
-		color: #7fd99a;
-		margin-right: 0.15rem;
-	}
-	.seg-height.start,
-	.seg-height.end {
-		background: rgba(127, 217, 154, 0.08);
-		border: 1px solid rgba(127, 217, 154, 0.35);
-		border-radius: 6px;
-		padding: 0.18rem 0.35rem;
-	}
-	.seg-height.start input,
-	.seg-height.end input {
-		background: var(--bg);
-		border: 1px solid rgba(127, 217, 154, 0.5);
-	}
-	.seg-height.start input:focus,
-	.seg-height.end input:focus {
-		border-color: #7fd99a;
-		box-shadow: 0 0 0 2px rgba(127, 217, 154, 0.25);
-	}
-	.seg-area {
-		display: flex;
-		justify-content: space-between;
-		align-items: baseline;
-		gap: 0.5rem;
-		font-size: 0.78rem;
-		margin-top: 0.2rem;
-	}
-
 	.layout {
 		display: grid;
 		grid-template-columns: minmax(0, 1fr) 18rem;
@@ -2342,147 +2303,296 @@
 	.dot.orange {
 		background: var(--accent);
 	}
+	/* ─── Section list ────────────────────────────────────────────────────
+	 * Each section is its own card with two clearly-titled inner groups:
+	 * "Ground levels" (green accent) and "Wall length" (orange accent).
+	 * The colour-coding mirrors the map legend so the user maps the
+	 * sidebar onto the satellite view at a glance.
+	 */
 	.seg-list {
 		list-style: none;
 		padding: 0;
 		margin: 0;
 		display: flex;
 		flex-direction: column;
-		gap: 0.5rem;
-		max-height: clamp(300px, 50vh, 560px);
+		gap: 0.7rem;
+		max-height: clamp(300px, 60vh, 640px);
 		overflow-y: auto;
+		/* Hide the cursor change on the card itself — focus is via clicking
+		 * inside the card; the whole-card click handler stays via the keyboard
+		 * Enter/Space binding for a11y. */
 	}
 	.seg-list > li {
 		background: var(--surface);
 		border: 1px solid var(--border);
-		border-radius: 10px;
-		padding: 0.5rem 0.6rem;
+		border-radius: 12px;
+		padding: 0;
 		display: flex;
 		flex-direction: column;
-		gap: 0.4rem;
 		cursor: pointer;
-		transition: border-color 0.15s, background 0.15s;
+		transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+		overflow: hidden;
 	}
 	.seg-list > li:hover {
 		border-color: var(--text-muted);
 	}
 	.seg-list > li.focused {
 		border-color: var(--accent);
-		background: rgba(255, 138, 28, 0.06);
+		background: rgba(255, 138, 28, 0.04);
 		box-shadow: 0 0 0 1px var(--accent);
 	}
-	.seg-head {
+
+	/* ─── Card head ──────────────────────────────────────────────────── */
+	.seg-card-head {
 		display: flex;
 		flex-direction: column;
-		gap: 0.35rem;
-		font-size: 0.78rem;
-		font-weight: 600;
+		gap: 0.2rem;
+		padding: 0.65rem 0.75rem 0.5rem;
+		border-bottom: 1px solid var(--border);
 	}
-	.seg-head-row {
+	.seg-name-row {
 		display: flex;
 		justify-content: space-between;
 		align-items: center;
-		gap: 0.5rem;
 	}
 	.seg-name {
 		font-weight: 600;
+		font-size: 0.85rem;
+		color: var(--text);
 	}
-	.seg-del {
+	.seg-del-icon {
 		background: transparent;
 		border: 1px solid transparent;
 		color: var(--text-muted);
-		width: 24px;
-		height: 24px;
+		width: 22px;
+		height: 22px;
 		border-radius: 6px;
 		cursor: pointer;
-		font-size: 1.1rem;
+		font-size: 0.75rem;
 		line-height: 1;
 		padding: 0;
-	}
-	.seg-del:hover {
-		color: var(--danger);
-		border-color: var(--danger);
-	}
-	.seg-height {
 		display: inline-flex;
 		align-items: center;
-		gap: 0.25rem;
+		justify-content: center;
+		opacity: 0.6;
+		transition: opacity 0.15s, color 0.15s, border-color 0.15s;
+	}
+	.seg-list > li:hover .seg-del-icon,
+	.seg-list > li.focused .seg-del-icon {
+		opacity: 1;
+	}
+	.seg-del-icon:hover {
+		color: var(--danger);
+		border-color: var(--danger);
+		opacity: 1 !important;
+	}
+
+	.seg-headline {
+		display: flex;
+		align-items: baseline;
+		gap: 0.5rem;
+		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+		font-size: 1rem;
+		font-weight: 600;
+		color: var(--text);
+	}
+	.seg-headline-unit {
+		font-size: 0.7rem;
+		color: var(--text-muted);
 		font-weight: 500;
+	}
+	.seg-headline-sep {
+		color: var(--text-muted);
+		font-weight: 400;
+	}
+
+	/* ─── Card groups ────────────────────────────────────────────────── */
+	.seg-group {
+		padding: 0.6rem 0.75rem 0.7rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.45rem;
+	}
+	.seg-group + .seg-group {
+		border-top: 1px dashed var(--border);
+	}
+	.seg-group-title {
+		margin: 0;
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		font-size: 0.68rem;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.07em;
 		color: var(--text-muted);
 	}
-	.seg-height input {
-		width: 4rem;
-		background: var(--bg);
-		border: 1px solid var(--border);
-		border-radius: 5px;
-		padding: 0.2rem 0.4rem;
+	.seg-group-dot {
+		width: 7px;
+		height: 7px;
+		border-radius: 50%;
+		display: inline-block;
+	}
+	.seg-group-dot.ground {
+		background: #7fd99a;
+	}
+	.seg-group-dot.length {
+		background: var(--accent);
+	}
+
+	/* ─── Ground levels group ────────────────────────────────────────── */
+	.seg-heights {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.4rem;
+	}
+	.seg-heights-arrow {
+		color: #7fd99a;
+		font-weight: 700;
+		font-size: 1rem;
+		flex-shrink: 0;
+	}
+	.seg-height {
+		display: flex;
+		flex-direction: column;
+		gap: 0.18rem;
+		flex: 1;
+		min-width: 0;
+	}
+	.seg-height-label {
+		font-size: 0.62rem;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		font-weight: 700;
+		color: #7fd99a;
+		padding-left: 0.05rem;
+	}
+	.seg-height-input {
+		display: flex;
+		align-items: center;
+		gap: 0.25rem;
+		background: rgba(127, 217, 154, 0.05);
+		border: 1px solid rgba(127, 217, 154, 0.35);
+		border-radius: 7px;
+		padding: 0.25rem 0.4rem;
+		transition: border-color 0.12s, box-shadow 0.12s;
+	}
+	.seg-height-input:focus-within {
+		border-color: #7fd99a;
+		box-shadow: 0 0 0 2px rgba(127, 217, 154, 0.2);
+	}
+	.seg-height-input input {
+		flex: 1;
+		min-width: 0;
+		width: 100%;
+		background: transparent;
+		border: none;
 		color: var(--text);
-		font-size: 0.78rem;
+		font-size: 0.9rem;
 		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+		font-weight: 600;
 		outline: none;
+		padding: 0;
+		/* Hide the native number-input spinner — looks fussy in this layout. */
+		-moz-appearance: textfield;
+		appearance: textfield;
 	}
-	.seg-height input:focus {
-		border-color: var(--accent);
+	.seg-height-input input::-webkit-outer-spin-button,
+	.seg-height-input input::-webkit-inner-spin-button {
+		-webkit-appearance: none;
+		margin: 0;
 	}
-	.seg-height .unit {
+	.seg-height-input .unit {
 		font-size: 0.7rem;
 		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+		color: var(--text-muted);
 	}
-	.seg-m2 {
-		color: var(--text);
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	.chain-caption {
+		margin: 0;
+		font-size: 0.7rem;
+		color: var(--text-muted);
+		line-height: 1.3;
+		display: flex;
+		align-items: center;
+		gap: 0.35rem;
 	}
+	.chain-glyph {
+		color: #7fd99a;
+		font-weight: 700;
+		font-size: 0.85rem;
+	}
+
+	/* ─── Wall length group ──────────────────────────────────────────── */
 	.edge-list {
 		list-style: none;
 		padding: 0;
 		margin: 0;
 		display: flex;
 		flex-direction: column;
-		gap: 0.3rem;
+		gap: 0.45rem;
 	}
 	.edge-list li {
-		display: grid;
-		grid-template-columns: 2rem 1fr auto;
-		align-items: center;
-		gap: 0.5rem;
-		padding: 0.25rem 0.3rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.3rem;
+		padding: 0;
 		border-radius: 6px;
 		transition: background 0.4s ease;
 	}
 	.edge-list li.recent {
-		background: rgba(74, 209, 101, 0.18);
+		background: rgba(74, 209, 101, 0.15);
+		padding: 0.25rem 0.35rem;
+		margin: -0.25rem -0.35rem;
+	}
+	.edge-current-row {
+		display: flex;
+		justify-content: space-between;
+		align-items: baseline;
+		gap: 0.4rem;
 	}
 	.edge-num {
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-size: 0.72rem;
+		font-size: 0.62rem;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		font-weight: 700;
 		color: var(--text-muted);
 	}
 	.edge-current {
 		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-size: 0.78rem;
+		font-size: 0.92rem;
+		font-weight: 600;
 		color: var(--text);
 	}
 	.edge-form {
-		display: flex;
-		gap: 0.3rem;
+		display: grid;
+		grid-template-columns: auto 1fr auto;
+		gap: 0.4rem;
 		align-items: center;
 	}
+	.edge-set-label {
+		font-size: 0.7rem;
+		color: var(--text-muted);
+		font-weight: 500;
+	}
 	.edge-form input {
-		width: 5rem;
+		min-width: 0;
 		background: var(--bg);
 		border: 1px solid var(--border);
-		border-radius: 6px;
-		padding: 0.25rem 0.4rem;
+		border-radius: 7px;
+		padding: 0.35rem 0.55rem;
 		color: var(--text);
-		font-size: 0.8rem;
+		font-size: 0.85rem;
+		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 		outline: none;
+		transition: border-color 0.12s;
 	}
 	.edge-form input:focus {
 		border-color: var(--accent);
 	}
 	.btn.tiny {
-		padding: 0.25rem 0.55rem;
-		font-size: 0.72rem;
+		padding: 0.35rem 0.7rem;
+		font-size: 0.75rem;
 	}
 
 	/* Layer-visibility toggles — sit just below MapLibre's +/- zoom buttons
