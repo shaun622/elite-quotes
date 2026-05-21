@@ -1191,6 +1191,11 @@
 		clearLabelMarkers();
 		if (mlCtors) {
 			const { Marker } = mlCtors;
+			// Edge length labels offset perpendicular to the edge by ~2.5 m so
+			// they sit BESIDE the line, not on top of it. Keeps the geometry
+			// itself readable and stops the WALL N pill (offset 6 m on the
+			// same perpendicular) from stacking over the length number.
+			const EDGE_LABEL_OFFSET_M = 5; // perpendicularLabelAnchor uses offsetMeters/2
 			const pushSegmentLabels = (segs: LngLat[][], kind: LabelKind) => {
 				for (const seg of segs) {
 					for (let i = 0; i < seg.length - 1; i++) {
@@ -1198,11 +1203,15 @@
 						const b = seg[i + 1];
 						const len = haversineMeters(a, b);
 						if (len < 0.05) continue; // skip near-zero spurs
-						const mid: LngLat = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+						const anchor = perpendicularLabelAnchor({
+							a,
+							b,
+							offsetMeters: EDGE_LABEL_OFFSET_M
+						});
 						addLabelMarker({
 							map: m,
 							Marker,
-							lngLat: mid,
+							lngLat: anchor,
 							text: `${len.toFixed(2)} m`,
 							kind
 						});
@@ -1332,7 +1341,9 @@
 					}
 				: { type: 'FeatureCollection', features: [] }
 		);
-		// Boundary edge labels — one per edge of the outer ring.
+		// Boundary edge labels — one per edge of the outer ring. Offset
+		// perpendicular by ~2.5 m so the labels don't sit on the boundary
+		// line itself (consistent with wall edge labels).
 		if (mlCtors && boundary && boundary.coordinates[0]) {
 			const ring = boundary.coordinates[0];
 			for (let i = 0; i < ring.length - 1; i++) {
@@ -1340,11 +1351,11 @@
 				const b = ring[i + 1] as LngLat;
 				const len = haversineMeters(a, b);
 				if (len < 0.5) continue; // skip the tiny closing spur duplicates
-				const mid: LngLat = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+				const anchor = perpendicularLabelAnchor({ a, b, offsetMeters: 5 });
 				addLabelMarker({
 					map: m,
 					Marker: mlCtors.Marker,
-					lngLat: mid,
+					lngLat: anchor,
 					text: `${len.toFixed(2)} m`,
 					kind: 'boundary'
 				});
@@ -2440,20 +2451,21 @@
 		justify-content: center;
 		min-width: 22px;
 		padding: 1px 5px;
-		border-radius: 999px;
+		border-radius: 5px;
 		font-size: 0.6rem;
 		font-weight: 700;
-		line-height: 1;
-		letter-spacing: 0.04em;
+		line-height: 1.3;
+		letter-spacing: 0.02em;
+		background: rgba(13, 13, 14, 0.88);
+		border: 1px solid transparent;
 	}
 	.legend-pill.name {
-		background: #d94c4c;
-		color: #fff;
-		text-transform: uppercase;
+		border-color: rgba(217, 76, 76, 0.85);
+		color: #ffc4c4;
 	}
 	.legend-pill.ground {
-		background: #2e8c4a;
-		color: #fff;
+		border-color: rgba(127, 217, 154, 0.75);
+		color: #c8efb1;
 	}
 
 	.layout {
@@ -2963,67 +2975,63 @@
 		line-height: 1;
 	}
 
-	/* Pill-style map labels rendered via MapLibre Markers. The base style
-	 * sets typography + a solid drop shadow so every pill reads cleanly
-	 * against any satellite tile. Each kind layers its own colour scheme. */
+	/* Unified label design — every map pill is a small dark capsule with a
+	 * thin coloured border that codes its category. Subtle drop shadow,
+	 * tabular numbers, monospace-feel mass. Reads like a real map app
+	 * (Apple/Google) rather than a video-game HUD. */
 	:global(.edge-label) {
 		font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-		font-size: 14px;
-		font-weight: 700;
+		font-size: 11px;
+		font-weight: 600;
 		font-variant-numeric: tabular-nums;
-		padding: 4px 10px;
-		border-radius: 999px;
+		padding: 2px 7px;
+		border-radius: 6px;
 		white-space: nowrap;
 		pointer-events: none;
 		user-select: none;
-		/* Double shadow — soft drop + 1-px outline — so the pill stands
-		 * proud against both light (grass / pale roofs) and dark (shaded
-		 * trees / asphalt) satellite tiles without an explicit border. */
-		box-shadow: 0 2px 6px rgba(0, 0, 0, 0.6), 0 0 0 1.5px rgba(0, 0, 0, 0.35);
+		background: rgba(13, 13, 14, 0.88);
+		color: #ffffff;
+		border: 1px solid transparent;
+		box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
 		letter-spacing: 0.01em;
+		line-height: 1.3;
 	}
 	:global(.edge-label--wall-active) {
-		background: #ff8a1c;
-		color: #1a0f00;
+		border-color: rgba(255, 138, 28, 0.85);
+		color: #ffd2a8;
 	}
 	:global(.edge-label--wall-other) {
-		background: rgba(255, 138, 28, 0.65);
-		color: #1a0f00;
+		border-color: rgba(255, 138, 28, 0.45);
+		color: #ffb87a;
+		opacity: 0.85;
 	}
 	:global(.edge-label--boundary) {
-		background: rgba(11, 11, 12, 0.92);
-		color: #ffffff;
-		border: 1px solid rgba(255, 210, 63, 0.9);
+		border-color: rgba(255, 210, 63, 0.8);
+		color: #ffeb9a;
 	}
 	:global(.edge-label--offset) {
-		background: rgba(11, 11, 12, 0.94);
+		border-color: rgba(127, 217, 154, 0.7);
 		color: #c8efb1;
-		border: 1px solid rgba(127, 217, 154, 0.9);
-		font-size: 11px;
-		padding: 3px 7px;
+		font-size: 10px;
+		padding: 1px 6px;
 	}
-	/* Wall name pill — red like the reference's "W1" / "W2" badges. Sits
-	 * on the wall centroid so it identifies the wall at a glance. */
+	/* Wall-name pill — small red-bordered capsule with the wall name in
+	 * mixed case. No uppercase, no chunky padding — it identifies the
+	 * wall without dominating the canvas. */
 	:global(.edge-label--wall-name) {
-		background: #d94c4c;
-		color: #fff;
-		font-size: 13px;
-		font-weight: 800;
-		padding: 5px 12px;
-		letter-spacing: 0.05em;
-		text-transform: uppercase;
-		box-shadow: 0 2px 7px rgba(0, 0, 0, 0.65), 0 0 0 1.5px rgba(0, 0, 0, 0.4);
-	}
-	/* Ground-level pill — green to match the Step 2 sidebar height inputs
-	 * and Step 3's reseed action. One pill per section-endpoint on the
-	 * active wall, showing the chained start/end height in mm. */
-	:global(.edge-label--ground) {
-		background: #2e8c4a;
-		color: #fff;
-		font-size: 12px;
+		border-color: rgba(217, 76, 76, 0.85);
+		color: #ffc4c4;
 		font-weight: 700;
-		padding: 4px 10px;
-		border: 1px solid rgba(255, 255, 255, 0.25);
+		font-size: 11px;
+		padding: 2px 8px;
+	}
+	/* Ground-level pill — green-bordered capsule showing the chained
+	 * start/end height in mm at each section endpoint. */
+	:global(.edge-label--ground) {
+		border-color: rgba(127, 217, 154, 0.75);
+		color: #c8efb1;
+		font-size: 11px;
+		padding: 2px 7px;
 	}
 
 	:global(.vertex-handle) {
