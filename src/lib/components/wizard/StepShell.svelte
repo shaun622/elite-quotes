@@ -10,6 +10,7 @@
 		quoteNumber,
 		quoteType = 'residential',
 		onTypeChange,
+		wide = false,
 		children
 	}: {
 		quoteId: string;
@@ -18,6 +19,10 @@
 		quoteNumber: number;
 		quoteType?: QuoteType;
 		onTypeChange?: (next: QuoteType) => void;
+		/** Map-heavy steps (Plan view, Elevation) drop the wizard's narrow
+		 *  56-rem column and fill the viewport so the satellite canvas can
+		 *  do its job. Form-heavy steps stay narrow for readability. */
+		wide?: boolean;
 		children?: Snippet;
 	} = $props();
 
@@ -30,7 +35,7 @@
 
 <ProgressBar {quoteId} {current} {steps} />
 
-<section class="step">
+<section class="step" class:wide>
 	<header class="step-head">
 		<div class="trail">
 			<a href="/quotes">Quotes</a>
@@ -75,6 +80,12 @@
 		max-width: 56rem;
 		margin: 0 auto;
 		padding: 1.5rem 1.25rem 6rem;
+	}
+	/* Map-heavy steps break the narrow column and span the viewport so the
+	 * map can fill ~75% of the screen the way site-designer-pro does. */
+	.step.wide {
+		max-width: none;
+		padding: 1rem 1.25rem 6rem;
 	}
 	.step-head {
 		display: flex;

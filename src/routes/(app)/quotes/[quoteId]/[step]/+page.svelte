@@ -61,6 +61,7 @@
 	quoteNumber={data.quoteNumber}
 	quoteType={data.data.quoteType}
 	onTypeChange={handleTypeChange}
+	wide={data.step === 2 || (data.step === 3 && data.data.quoteType === 'civil')}
 >
 	{#if data.step === 1}
 		<Step1Client

@@ -1463,6 +1463,10 @@
 	let photoUploading = $state(false);
 	let photoCount = $state(0);
 	let photoError = $state('');
+	// Collapsed by default — photos sit in the sidebar accordion and most
+	// quoting sessions open the page without needing to look at them.
+	// svelte-ignore state_referenced_locally
+	let photosExpanded = $state(initialData.photos.length > 0);
 
 	async function onPhotoPick(e: Event) {
 		const input = e.currentTarget as HTMLInputElement;
@@ -1575,70 +1579,6 @@
 		</div>
 	</header>
 
-	<section class="photos-strip" aria-label="Site photos">
-		<header class="photos-strip-head">
-			<div>
-				<strong>Site photos</strong>
-				<span class="muted small">
-					{data.photos.length} photo{data.photos.length === 1 ? '' : 's'} · lands on the client PDF
-				</span>
-			</div>
-			<div class="photo-actions">
-				<label class="photo-btn">
-					<input
-						type="file"
-						accept="image/jpeg,image/png,image/webp,image/heic,image/heif"
-						multiple
-						hidden
-						onchange={onPhotoPick}
-						disabled={photoUploading}
-					/>
-					{#if photoUploading}
-						Uploading {photoCount} photo{photoCount === 1 ? '' : 's'}…
-					{:else}
-						+ Add photos
-					{/if}
-				</label>
-				<label class="photo-btn ghost">
-					<input
-						type="file"
-						accept="image/*"
-						capture="environment"
-						hidden
-						onchange={onPhotoPick}
-						disabled={photoUploading}
-					/>
-					📷 Take photo
-				</label>
-			</div>
-		</header>
-		{#if data.photos.length > 0}
-			<ul class="photo-grid">
-				{#each data.photos as p (p.id)}
-					<li>
-						<img
-							src="/api/quotes/{quoteId}/photos/{p.id}"
-							alt={p.label || 'Site photo'}
-							loading="lazy"
-						/>
-						<button
-							type="button"
-							class="photo-rm"
-							onclick={() => deletePhoto(p.id)}
-							aria-label="Remove photo"
-							title="Remove"
-						>
-							×
-						</button>
-					</li>
-				{/each}
-			</ul>
-		{/if}
-		{#if photoError}
-			<p class="photo-err">{photoError}</p>
-		{/if}
-	</section>
-
 	{#if tool === 'draw'}
 		<div class="draw-banner" role="status" aria-live="polite">
 			<span class="draw-banner-dot"></span>
@@ -1706,90 +1646,81 @@
 	{/if}
 
 	<div class="layout">
-	<div class="map-frame" class:hide-labels={!showLabels}>
-		<div class="map" bind:this={mapContainer}></div>
-		{#if mapStatus !== 'ready'}
-			<div class="map-loading">Loading satellite…</div>
-		{/if}
-
-		<div class="layer-toggles" role="group" aria-label="Map layers">
-			<label>
-				<input type="checkbox" bind:checked={showBoundary} />
-				<span>Boundary</span>
-			</label>
-			<label>
-				<input type="checkbox" bind:checked={showLabels} />
-				<span>Labels</span>
-			</label>
-		</div>
-
-		<div class="tools" role="toolbar" aria-label="Map tool">
-			<button
-				type="button"
-				class="tool-btn"
-				class:active={tool === 'pan'}
-				aria-pressed={tool === 'pan'}
-				title="Pan / navigate (V)"
-				onclick={() => (tool = 'pan')}
-			>
-				<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-					<path d="M18 11V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v0" />
-					<path d="M14 10V4a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v2" />
-					<path d="M10 10.5V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v8" />
-					<path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15" />
-				</svg>
-				<span class="tool-label">Pan</span>
-			</button>
-			<button
-				type="button"
-				class="tool-btn"
-				class:active={tool === 'draw'}
-				aria-pressed={tool === 'draw'}
-				title="Draw wall points (D)"
-				onclick={() => (tool = 'draw')}
-			>
-				<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-					<path d="M12 21s-7-4.5-7-11a7 7 0 1 1 14 0c0 6.5-7 11-7 11z" />
-					<circle cx="12" cy="10" r="2.5" />
-				</svg>
-				<span class="tool-label">Draw</span>
-			</button>
-		</div>
-
-		<div class="map-legend" aria-label="Map legend">
-			<span class="legend-row">
-				<span class="legend-swatch wall" aria-hidden="true"></span>
-				<span>Wall</span>
-			</span>
-			<span class="legend-row">
-				<span class="legend-swatch offset" aria-hidden="true"></span>
-				<span>Boundary offset</span>
-			</span>
-			<span class="legend-row">
-				<span class="legend-swatch boundary" aria-hidden="true"></span>
-				<span>Property boundary</span>
-			</span>
-			{#if data.walls.length > 1}
-				<span class="legend-row">
-					<span class="legend-swatch other" aria-hidden="true"></span>
-					<span>Other walls</span>
-				</span>
-			{/if}
-		</div>
-
-		<div class="map-hint">
-			{#if tool === 'pan'}
-				Pan tool — drag to navigate, scroll/pinch to zoom. Drag a vertex to move it. Double-click a vertex to remove. Double-click the line between vertices to add one.
-			{:else if pendingStart === null}
-				Click the start of the line. {#if snapHintLabel}<strong class="snap-tag">{snapHintLabel}</strong>{/if}
-			{:else}
-				Click the end. {#if snapHintLabel}<strong class="snap-tag">{snapHintLabel}</strong>{/if}
-			{/if}
-		</div>
-
-	</div>
-
 	<aside class="walls-panel" aria-label="Walls and segments">
+		<section class="side-photos" aria-label="Site photos">
+			<button
+				type="button"
+				class="side-photos-head"
+				onclick={() => (photosExpanded = !photosExpanded)}
+				aria-expanded={photosExpanded}
+			>
+				<span class="side-photos-title">Site photos</span>
+				<span class="side-photos-count muted small">
+					{data.photos.length}
+				</span>
+				<span class="caret" aria-hidden="true">{photosExpanded ? '▾' : '▸'}</span>
+			</button>
+			{#if photosExpanded}
+				<div class="side-photos-body">
+					<div class="side-photo-actions">
+						<label class="photo-btn">
+							<input
+								type="file"
+								accept="image/jpeg,image/png,image/webp,image/heic,image/heif"
+								multiple
+								hidden
+								onchange={onPhotoPick}
+								disabled={photoUploading}
+							/>
+							{#if photoUploading}
+								Uploading {photoCount}…
+							{:else}
+								+ Add
+							{/if}
+						</label>
+						<label class="photo-btn ghost">
+							<input
+								type="file"
+								accept="image/*"
+								capture="environment"
+								hidden
+								onchange={onPhotoPick}
+								disabled={photoUploading}
+							/>
+							📷 Camera
+						</label>
+					</div>
+					{#if data.photos.length > 0}
+						<ul class="photo-grid">
+							{#each data.photos as p (p.id)}
+								<li>
+									<img
+										src="/api/quotes/{quoteId}/photos/{p.id}"
+										alt={p.label || 'Site photo'}
+										loading="lazy"
+									/>
+									<button
+										type="button"
+										class="photo-rm"
+										onclick={() => deletePhoto(p.id)}
+										aria-label="Remove photo"
+										title="Remove"
+									>
+										×
+									</button>
+								</li>
+							{/each}
+						</ul>
+					{:else}
+						<p class="muted small">No photos yet. Add on-site captures here — they land on the client PDF.</p>
+					{/if}
+					{#if photoError}
+						<p class="photo-err">{photoError}</p>
+					{/if}
+				</div>
+			{/if}
+		</section>
+
 		<div class="walls-panel-head">
 			<h3>Segments</h3>
 			<span class="muted small">Type a length and hit Enter to set any edge.</span>
@@ -1962,6 +1893,89 @@
 			{/if}
 		{/if}
 	</aside>
+
+	<div class="map-frame" class:hide-labels={!showLabels}>
+		<div class="map" bind:this={mapContainer}></div>
+		{#if mapStatus !== 'ready'}
+			<div class="map-loading">Loading satellite…</div>
+		{/if}
+
+		<div class="layer-toggles" role="group" aria-label="Map layers">
+			<label>
+				<input type="checkbox" bind:checked={showBoundary} />
+				<span>Boundary</span>
+			</label>
+			<label>
+				<input type="checkbox" bind:checked={showLabels} />
+				<span>Labels</span>
+			</label>
+		</div>
+
+		<div class="tools" role="toolbar" aria-label="Map tool">
+			<button
+				type="button"
+				class="tool-btn"
+				class:active={tool === 'pan'}
+				aria-pressed={tool === 'pan'}
+				title="Pan / navigate (V)"
+				onclick={() => (tool = 'pan')}
+			>
+				<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+					<path d="M18 11V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v0" />
+					<path d="M14 10V4a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v2" />
+					<path d="M10 10.5V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v8" />
+					<path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15" />
+				</svg>
+				<span class="tool-label">Pan</span>
+			</button>
+			<button
+				type="button"
+				class="tool-btn"
+				class:active={tool === 'draw'}
+				aria-pressed={tool === 'draw'}
+				title="Draw wall points (D)"
+				onclick={() => (tool = 'draw')}
+			>
+				<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+					<path d="M12 21s-7-4.5-7-11a7 7 0 1 1 14 0c0 6.5-7 11-7 11z" />
+					<circle cx="12" cy="10" r="2.5" />
+				</svg>
+				<span class="tool-label">Draw</span>
+			</button>
+		</div>
+
+		<div class="map-legend" aria-label="Map legend">
+			<span class="legend-row">
+				<span class="legend-swatch wall" aria-hidden="true"></span>
+				<span>Wall</span>
+			</span>
+			<span class="legend-row">
+				<span class="legend-swatch offset" aria-hidden="true"></span>
+				<span>Boundary offset</span>
+			</span>
+			<span class="legend-row">
+				<span class="legend-swatch boundary" aria-hidden="true"></span>
+				<span>Property boundary</span>
+			</span>
+			{#if data.walls.length > 1}
+				<span class="legend-row">
+					<span class="legend-swatch other" aria-hidden="true"></span>
+					<span>Other walls</span>
+				</span>
+			{/if}
+		</div>
+
+		<div class="map-hint">
+			{#if tool === 'pan'}
+				Pan tool — drag to navigate, scroll/pinch to zoom. Drag a vertex to move it. Double-click a vertex to remove. Double-click the line between vertices to add one.
+			{:else if pendingStart === null}
+				Click the start of the line. {#if snapHintLabel}<strong class="snap-tag">{snapHintLabel}</strong>{/if}
+			{:else}
+				Click the end. {#if snapHintLabel}<strong class="snap-tag">{snapHintLabel}</strong>{/if}
+			{/if}
+		</div>
+
+	</div>
 	</div>
 
 	<footer class="summary">
@@ -2161,7 +2175,10 @@
 	.map-frame {
 		position: relative;
 		width: 100%;
-		height: clamp(420px, 60vh, 720px);
+		/* Map-first sizing — fills ~78% of the viewport height so the
+		 * satellite canvas is the dominant element on the page, matching
+		 * the site-designer-pro layout the boss flagged as the reference. */
+		height: clamp(560px, 78vh, 1000px);
 		border-radius: 12px;
 		border: 1px solid var(--border);
 		overflow: hidden;
@@ -2253,7 +2270,10 @@
 
 	.layout {
 		display: grid;
-		grid-template-columns: minmax(0, 1fr) 18rem;
+		/* Sidebar LEFT (narrow), map RIGHT (huge). Mirrors the reference
+		 * site-designer-pro layout where the map is the canvas and the
+		 * sidebar is a slim control panel. */
+		grid-template-columns: 17rem minmax(0, 1fr);
 		gap: 1rem;
 		align-items: stretch;
 	}
@@ -2266,9 +2286,72 @@
 	.walls-panel {
 		display: flex;
 		flex-direction: column;
-		gap: 0.5rem;
+		gap: 0.6rem;
 		min-width: 0;
+		/* Sidebar scrolls independently of the map so the user can scroll
+		 * sections without losing their place on the satellite. */
+		max-height: clamp(560px, 78vh, 1000px);
+		overflow-y: auto;
+		padding-right: 0.25rem;
 	}
+	/* ─── Sidebar photos accordion ─────────────────────────────────────
+	 * Photos used to live in a full-width strip above the map. With the
+	 * map-first layout the strip ate too much vertical real estate, so
+	 * they now collapse into the sidebar. Default is collapsed when
+	 * empty so the user lands directly on the segment list. */
+	.side-photos {
+		background: var(--surface);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		display: flex;
+		flex-direction: column;
+		overflow: hidden;
+	}
+	.side-photos-head {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		width: 100%;
+		padding: 0.55rem 0.7rem;
+		background: transparent;
+		border: none;
+		color: var(--text);
+		cursor: pointer;
+		font: inherit;
+		text-align: left;
+	}
+	.side-photos-head:hover {
+		background: rgba(255, 255, 255, 0.03);
+	}
+	.side-photos-title {
+		font-weight: 600;
+		font-size: 0.82rem;
+		flex: 1;
+	}
+	.side-photos-count {
+		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+		background: rgba(255, 255, 255, 0.05);
+		padding: 0.05rem 0.4rem;
+		border-radius: 4px;
+	}
+	.caret {
+		color: var(--text-muted);
+		font-size: 0.75rem;
+	}
+	.side-photos-body {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+		padding: 0 0.7rem 0.7rem;
+		border-top: 1px dashed var(--border);
+		padding-top: 0.5rem;
+	}
+	.side-photo-actions {
+		display: flex;
+		gap: 0.4rem;
+		flex-wrap: wrap;
+	}
+
 	.walls-panel-head {
 		display: flex;
 		flex-direction: column;
@@ -2316,11 +2399,10 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0.7rem;
-		max-height: clamp(300px, 60vh, 640px);
-		overflow-y: auto;
-		/* Hide the cursor change on the card itself — focus is via clicking
-		 * inside the card; the whole-card click handler stays via the keyboard
-		 * Enter/Space binding for a11y. */
+		/* No inner scroll — the parent .walls-panel scrolls. Nested scrollers
+		 * mean the user sometimes scrolls the inner instead of the page and
+		 * gets stuck.
+		 */
 	}
 	.seg-list > li {
 		background: var(--surface);
@@ -2727,34 +2809,6 @@
 	}
 	:global(.vertex-handle:active) {
 		cursor: grabbing;
-	}
-	/* Site photos strip — sits above the draw banner / map. */
-	.photos-strip {
-		background: var(--surface);
-		border: 1px solid var(--border);
-		border-radius: 12px;
-		padding: 0.75rem 0.875rem;
-		display: flex;
-		flex-direction: column;
-		gap: 0.625rem;
-	}
-	.photos-strip-head {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		gap: 1rem;
-		flex-wrap: wrap;
-	}
-	.photos-strip-head strong {
-		font-size: 0.95rem;
-	}
-	.photos-strip-head .muted.small {
-		margin-left: 0.5rem;
-	}
-	.photo-actions {
-		display: flex;
-		gap: 0.5rem;
-		flex-wrap: wrap;
 	}
 	.photo-btn {
 		display: inline-flex;
