@@ -837,7 +837,13 @@
 		labelMarkers = [];
 	}
 
-	type LabelKind = 'wall-active' | 'wall-other' | 'boundary' | 'offset';
+	type LabelKind =
+		| 'wall-active'
+		| 'wall-other'
+		| 'boundary'
+		| 'offset'
+		| 'wall-name'
+		| 'ground';
 
 	function addLabelMarker(opts: {
 		map: MLMap;
@@ -1160,7 +1166,8 @@
 			features: offsetFeatures
 		});
 
-		// Length labels — rendered as HTML markers so we get pill styling.
+		// Length labels + name pills + ground-level pills — all rendered as
+		// HTML markers so we get full CSS pill styling and crisp text.
 		clearLabelMarkers();
 		if (mlCtors) {
 			const { Marker } = mlCtors;
@@ -1186,6 +1193,60 @@
 			for (const w of data.walls) {
 				if (w.id === aId) continue;
 				pushSegmentLabels(pathToSegments(w.pathGeoJson ?? null), 'wall-other');
+			}
+
+			// Wall name pill — placed at the centroid of all wall vertices so
+			// it lands somewhere readable regardless of wall shape. Walls with
+			// no geometry get skipped (nothing to anchor to).
+			const wallNameAnchor = (segs: LngLat[][]): LngLat | null => {
+				const all: LngLat[] = [];
+				for (const seg of segs) for (const c of seg) all.push(c);
+				if (all.length === 0) return null;
+				const cx = all.reduce((s, c) => s + c[0], 0) / all.length;
+				const cy = all.reduce((s, c) => s + c[1], 0) / all.length;
+				return [cx, cy];
+			};
+			for (const w of data.walls) {
+				const segs = pathToSegments(w.pathGeoJson ?? null);
+				const anchor = wallNameAnchor(segs);
+				if (!anchor) continue;
+				addLabelMarker({
+					map: m,
+					Marker,
+					lngLat: anchor,
+					text: w.name,
+					kind: 'wall-name'
+				});
+			}
+
+			// Ground-level pills at section endpoints — show the start height
+			// at the very first vertex of the wall, then the end height at the
+			// last vertex of every section. End[i] = Start[i+1] by the chain,
+			// so labelling only ends after the first section gives a clean
+			// one-pill-per-junction effect.
+			if (aWall && aSegments.length > 0) {
+				for (let i = 0; i < aSegments.length; i++) {
+					const seg = aSegments[i];
+					if (seg.length < 2) continue;
+					if (i === 0) {
+						const startMm = sectionStartMm(aWall, 0);
+						addLabelMarker({
+							map: m,
+							Marker,
+							lngLat: seg[0],
+							text: `${Math.round(startMm)} mm`,
+							kind: 'ground'
+						});
+					}
+					const endMm = sectionEndMm(aWall, i);
+					addLabelMarker({
+						map: m,
+						Marker,
+						lngLat: seg[seg.length - 1],
+						text: `${Math.round(endMm)} mm`,
+						kind: 'ground'
+					});
+				}
 			}
 		}
 
@@ -1957,6 +2018,14 @@
 				<span class="legend-swatch boundary" aria-hidden="true"></span>
 				<span>Property boundary</span>
 			</span>
+			<span class="legend-row">
+				<span class="legend-pill name" aria-hidden="true">W1</span>
+				<span>Wall name</span>
+			</span>
+			<span class="legend-row">
+				<span class="legend-pill ground" aria-hidden="true">600</span>
+				<span>Ground level (mm)</span>
+			</span>
 			{#if data.walls.length > 1}
 				<span class="legend-row">
 					<span class="legend-swatch other" aria-hidden="true"></span>
@@ -2266,6 +2335,27 @@
 	.legend-swatch.other {
 		background: rgba(255, 138, 28, 0.55);
 		height: 2px;
+	}
+	.legend-pill {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-width: 22px;
+		padding: 1px 5px;
+		border-radius: 999px;
+		font-size: 0.6rem;
+		font-weight: 700;
+		line-height: 1;
+		letter-spacing: 0.04em;
+	}
+	.legend-pill.name {
+		background: #d94c4c;
+		color: #fff;
+		text-transform: uppercase;
+	}
+	.legend-pill.ground {
+		background: #2e8c4a;
+		color: #fff;
 	}
 
 	.layout {
@@ -2763,18 +2853,20 @@
 		display: none !important;
 	}
 
-	/* Pill-style edge labels rendered via MapLibre Markers. */
+	/* Pill-style map labels rendered via MapLibre Markers. The base style
+	 * sets typography + a solid drop shadow so every pill reads cleanly
+	 * against any satellite tile. Each kind layers its own colour scheme. */
 	:global(.edge-label) {
 		font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-		font-size: 11px;
-		font-weight: 600;
+		font-size: 12px;
+		font-weight: 700;
 		font-variant-numeric: tabular-nums;
-		padding: 3px 7px;
+		padding: 3px 8px;
 		border-radius: 999px;
 		white-space: nowrap;
 		pointer-events: none;
 		user-select: none;
-		box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+		box-shadow: 0 1px 4px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(0, 0, 0, 0.25);
 		letter-spacing: 0.01em;
 	}
 	:global(.edge-label--wall-active) {
@@ -2782,13 +2874,13 @@
 		color: #1a0f00;
 	}
 	:global(.edge-label--wall-other) {
-		background: rgba(255, 138, 28, 0.5);
+		background: rgba(255, 138, 28, 0.6);
 		color: #1a0f00;
 	}
 	:global(.edge-label--boundary) {
-		background: rgba(11, 11, 12, 0.85);
+		background: rgba(11, 11, 12, 0.88);
 		color: #ffffff;
-		border: 1px solid rgba(255, 138, 28, 0.7);
+		border: 1px solid rgba(255, 138, 28, 0.8);
 	}
 	:global(.edge-label--offset) {
 		background: rgba(11, 11, 12, 0.92);
@@ -2796,6 +2888,29 @@
 		border: 1px solid rgba(127, 217, 154, 0.85);
 		font-size: 10px;
 		padding: 2px 6px;
+	}
+	/* Wall name pill — red like the reference's "W1" / "W2" badges. Sits
+	 * on the wall centroid so it identifies the wall at a glance. */
+	:global(.edge-label--wall-name) {
+		background: #d94c4c;
+		color: #fff;
+		font-size: 12px;
+		font-weight: 800;
+		padding: 4px 10px;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+		box-shadow: 0 1px 5px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(0, 0, 0, 0.3);
+	}
+	/* Ground-level pill — green to match the Step 2 sidebar height inputs
+	 * and Step 3's reseed action. One pill per section-endpoint on the
+	 * active wall, showing the chained start/end height in mm. */
+	:global(.edge-label--ground) {
+		background: #2e8c4a;
+		color: #fff;
+		font-size: 11px;
+		font-weight: 700;
+		padding: 3px 8px;
+		border: 1px solid rgba(255, 255, 255, 0.2);
 	}
 
 	:global(.vertex-handle) {
