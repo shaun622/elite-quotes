@@ -549,6 +549,10 @@
 	}
 	// svelte-ignore state_referenced_locally
 	let showBoundary = $state(readToggle('eq.step2.showBoundary', true));
+	// New key (`.v2`) so any stale `0` from the previous toggle iteration
+	// is ignored and users land on the default-ON behaviour.
+	// svelte-ignore state_referenced_locally
+	let showLabels = $state(readToggle('eq.step2.showLabels.v2', true));
 
 	$effect(() => {
 		const v = showBoundary;
@@ -560,16 +564,11 @@
 		}
 	});
 
-	// Defensive cleanup: an earlier release had a "Labels" master toggle
-	// that some users left switched off. We removed the toggle (labels are
-	// now always visible) but the stale `0` is still in their localStorage
-	// shadowing the default — and the old global CSS rule would still hide
-	// them if it ever came back. Wipe the key so reloads return to the
-	// always-on default.
 	$effect(() => {
+		const v = showLabels;
 		if (!browser) return;
 		try {
-			localStorage.removeItem('eq.step2.showLabels');
+			localStorage.setItem('eq.step2.showLabels.v2', v ? '1' : '0');
 		} catch {
 			/* private mode — fine */
 		}
@@ -667,15 +666,15 @@
 				m.addSource('hover-ghost', { type: 'geojson', data: empty() });
 				m.addSource('pending-start', { type: 'geojson', data: empty() });
 
-				// Property boundary — solid orange perimeter, slightly translucent fill so
+				// Property boundary — solid yellow perimeter, slightly translucent fill so
 				// the lot reads at a glance without obscuring the satellite imagery.
 				m.addLayer({
 					id: 'boundary-fill',
 					source: 'boundary',
 					type: 'fill',
 					paint: {
-						'fill-color': '#ff8a1c',
-						'fill-opacity': 0.06
+						'fill-color': '#ffd23f',
+						'fill-opacity': 0.05
 					}
 				});
 				m.addLayer({
@@ -683,7 +682,7 @@
 					source: 'boundary',
 					type: 'line',
 					paint: {
-						'line-color': '#ff8a1c',
+						'line-color': '#ffd23f',
 						'line-width': 2.5,
 						'line-opacity': 0.95
 					}
@@ -1216,16 +1215,32 @@
 				pushSegmentLabels(pathToSegments(w.pathGeoJson ?? null), 'wall-other');
 			}
 
-			// Wall name pill — placed at the centroid of all wall vertices so
-			// it lands somewhere readable regardless of wall shape. Walls with
-			// no geometry get skipped (nothing to anchor to).
+			// Wall name pill — offset perpendicular to the wall so it sits
+			// BESIDE the wall's edge-length label instead of stacking on top
+			// of it. For a two-vertex wall (the common case) the centroid IS
+			// the edge midpoint, which is where the length pill lives — that
+			// was the bug that made the wall length look "missing".
 			const wallNameAnchor = (segs: LngLat[][]): LngLat | null => {
-				const all: LngLat[] = [];
-				for (const seg of segs) for (const c of seg) all.push(c);
-				if (all.length === 0) return null;
-				const cx = all.reduce((s, c) => s + c[0], 0) / all.length;
-				const cy = all.reduce((s, c) => s + c[1], 0) / all.length;
-				return [cx, cy];
+				// Find the longest sub-segment (most stable anchor for multi-
+				// segment walls) and offset perpendicular to its first edge.
+				let bestSeg: LngLat[] | null = null;
+				let bestLen = -1;
+				for (const seg of segs) {
+					if (seg.length < 2) continue;
+					const len = polylineLengthMeters(seg);
+					if (len > bestLen) {
+						bestLen = len;
+						bestSeg = seg;
+					}
+				}
+				if (!bestSeg) return null;
+				// Offset by ~6 metres perpendicular — clears the edge label
+				// pill at any sensible zoom while staying clearly "on" the wall.
+				return perpendicularLabelAnchor({
+					a: bestSeg[0],
+					b: bestSeg[1],
+					offsetMeters: 6
+				});
 			};
 			for (const w of data.walls) {
 				const segs = pathToSegments(w.pathGeoJson ?? null);
@@ -2003,16 +2018,21 @@
 		{/if}
 	</aside>
 
-	<div class="map-frame">
+	<div class="map-frame" class:hide-labels={!showLabels}>
 		<div class="map" bind:this={mapContainer}></div>
 		{#if mapStatus !== 'ready'}
 			<div class="map-loading">Loading satellite…</div>
 		{/if}
 
 		<div class="layer-toggles" role="group" aria-label="Map layers">
+			<header class="layer-toggles-title">View</header>
 			<label>
 				<input type="checkbox" bind:checked={showBoundary} />
 				<span>Boundary</span>
+			</label>
+			<label>
+				<input type="checkbox" bind:checked={showLabels} />
+				<span>Labels</span>
 			</label>
 		</div>
 
@@ -2372,8 +2392,7 @@
 		height: 0;
 	}
 	.legend-swatch.boundary {
-		background: #ff8a1c;
-		opacity: 0.7;
+		background: #ffd23f;
 		height: 2px;
 	}
 	.legend-swatch.other {
@@ -2812,36 +2831,53 @@
 	}
 
 	/* Layer-visibility toggles — sit just below MapLibre's +/- zoom buttons
-	 * on the top-right edge of the map. Keeps the left side clear for the
-	 * Pan/Draw tools palette and avoids overlapping with the active vertex. */
+	 * on the top-right edge of the map. Bigger + clearly titled "View" so
+	 * the user sees them on first load (the boss missed them entirely with
+	 * the older small variant). */
 	.layer-toggles {
 		position: absolute;
 		top: calc(0.6rem + 78px);
 		right: 0.6rem;
 		display: flex;
 		flex-direction: column;
-		gap: 0.2rem;
-		background: rgba(11, 11, 12, 0.85);
+		gap: 0.3rem;
+		background: rgba(11, 11, 12, 0.92);
 		border: 1px solid var(--border);
-		border-radius: 8px;
-		padding: 0.3rem 0.5rem;
-		font-size: 0.75rem;
+		border-radius: 10px;
+		padding: 0.5rem 0.7rem;
+		font-size: 0.82rem;
 		z-index: 2;
+		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+	}
+	.layer-toggles-title {
+		font-size: 0.65rem;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--text-muted);
+		margin-bottom: 0.1rem;
 	}
 	.layer-toggles label {
 		display: flex;
 		align-items: center;
-		gap: 0.35rem;
+		gap: 0.45rem;
 		cursor: pointer;
 		user-select: none;
 		color: var(--text);
-		padding: 0.05rem 0;
+		padding: 0.1rem 0;
 	}
 	.layer-toggles input[type='checkbox'] {
 		accent-color: var(--accent);
-		width: 14px;
-		height: 14px;
+		width: 16px;
+		height: 16px;
 		margin: 0;
+	}
+
+	/* When labels are toggled off, hide every pill we render via MapLibre
+	 * markers. Boundary lengths, wall lengths, wall-name pills, offset
+	 * label and ground-level pills all use the .edge-label class. */
+	:global(.map-frame.hide-labels .edge-label) {
+		display: none !important;
 	}
 
 	.tools {
@@ -2922,7 +2958,7 @@
 	:global(.edge-label--boundary) {
 		background: rgba(11, 11, 12, 0.92);
 		color: #ffffff;
-		border: 1px solid rgba(255, 138, 28, 0.9);
+		border: 1px solid rgba(255, 210, 63, 0.9);
 	}
 	:global(.edge-label--offset) {
 		background: rgba(11, 11, 12, 0.94);
