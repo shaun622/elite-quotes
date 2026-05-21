@@ -60,14 +60,32 @@ const PostSchema = z.object({
 });
 
 const WallDefaultsSchema = z.object({
-	boundaryOffsetMm: z.number().int().nonnegative().default(100),
+	/** Boundary offset (mm). 300mm matches the typical AS 4678 setback used
+	 *  on residential jobs — most council DA conditions sit between 300 and
+	 *  500mm for sleeper walls. The drawing tool snaps clicks to this line. */
+	boundaryOffsetMm: z.number().int().nonnegative().default(300),
 	panelModuleMm: z.number().int().positive().default(200),
 	postSpacingMm: z.number().int().positive().default(2400),
 	concreteStrength: z.enum(['N25', 'N32']).default('N25'),
 	/** Default retained height (mm) used for m² area calc on every section
-	 *  that hasn't set its own override in `sectionHeightsMm`. */
+	 *  that hasn't set its own override in `sectionHeights`. */
 	defaultHeightMm: z.number().int().nonnegative().default(600)
 });
+
+/**
+ * Per-section retained-height (start + end). Walls slope along their length,
+ * so a single value per section loses information the installer needs. The
+ * end of section i is the SAME ground point as the start of section i+1, so
+ * the editor keeps `endMm[i] === startMm[i+1]` when the user edits either.
+ *
+ * Either value can be `null` meaning "fall back to wall.defaults.defaultHeightMm".
+ */
+const SectionHeightSchema = z.object({
+	startMm: z.number().int().nonnegative().nullable().default(null),
+	endMm: z.number().int().nonnegative().nullable().default(null)
+});
+
+export type SectionHeight = z.infer<typeof SectionHeightSchema>;
 
 /**
  * GeoJSON path for a wall. WGS84 [lng, lat] coordinates.
@@ -93,11 +111,18 @@ const WallSchema = z.object({
 	name: z.string().default('Wall 1'),
 	pathGeoJson: PathGeoJsonSchema.nullable().default(null),
 	posts: z.array(PostSchema).default([]),
-	/** Per-section retained-height overrides (mm). Index matches the
+	/** Legacy per-section retained-height overrides (mm). Index matches the
 	 *  sub-segment index in pathGeoJson. `null` means "use the wall's
-	 *  defaults.defaultHeightMm". Array length is kept in sync with the
-	 *  sub-segment count by the editor. */
+	 *  defaults.defaultHeightMm". Kept so existing quotes parse; the editor
+	 *  reads `sectionHeights` instead. New writes set BOTH so older clients
+	 *  reading mid-deploy still see something sensible. */
 	sectionHeightsMm: z.array(z.number().int().nonnegative().nullable()).default([]),
+	/** Per-section start + end retained heights (mm). The end of section i
+	 *  is the same physical ground point as the start of section i+1, so the
+	 *  editor keeps `sectionHeights[i].endMm === sectionHeights[i+1].startMm`.
+	 *  Either field may be `null` (use defaultHeightMm). Array length is
+	 *  kept in sync with the sub-segment count by the editor. */
+	sectionHeights: z.array(SectionHeightSchema).default([]),
 	defaults: WallDefaultsSchema.default(() => WallDefaultsSchema.parse({}))
 });
 

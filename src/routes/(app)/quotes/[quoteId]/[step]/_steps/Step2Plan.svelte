@@ -19,6 +19,7 @@
 		pathToSegments,
 		perpendicularLabelAnchor,
 		polylineLengthMeters,
+		projectPointOnPolyline,
 		segmentsToPath,
 		snapAngle,
 		type LngLat
@@ -155,32 +156,112 @@
 		const w = activeWall();
 		if (!w) return;
 		w.pathGeoJson = segmentsToPath(segs);
-		// Keep section-height overrides aligned: pad or trim to the new length.
-		const current = Array.isArray(w.sectionHeightsMm) ? w.sectionHeightsMm : [];
-		const next: (number | null)[] = current.slice(0, segs.length);
-		while (next.length < segs.length) next.push(null);
-		w.sectionHeightsMm = next;
+		// Keep legacy + new height arrays aligned: pad or trim to the new length.
+		const legacy = Array.isArray(w.sectionHeightsMm) ? w.sectionHeightsMm : [];
+		const nextLegacy: (number | null)[] = legacy.slice(0, segs.length);
+		while (nextLegacy.length < segs.length) nextLegacy.push(null);
+		w.sectionHeightsMm = nextLegacy;
+
+		const heights = Array.isArray(w.sectionHeights) ? w.sectionHeights : [];
+		const nextHeights = heights.slice(0, segs.length).map((h) => ({
+			startMm: h?.startMm ?? null,
+			endMm: h?.endMm ?? null
+		}));
+		while (nextHeights.length < segs.length) nextHeights.push({ startMm: null, endMm: null });
+		w.sectionHeights = nextHeights;
 		mapVersion++;
 	}
 
-	/** Resolve the height in mm to use for the m² calc on a given section.
-	 *  Per-section override wins; falls back to wall default. */
-	function sectionHeightMm(wall: ReturnType<typeof activeWall>, segIdx: number): number {
+	/** Read the start height for section i. Falls back through the new
+	 *  `sectionHeights[i].startMm` → legacy `sectionHeightsMm[i]` → wall default. */
+	function sectionStartMm(wall: ReturnType<typeof activeWall>, segIdx: number): number {
 		if (!wall) return 0;
-		const override = wall.sectionHeightsMm?.[segIdx];
-		if (typeof override === 'number') return override;
+		const v = wall.sectionHeights?.[segIdx]?.startMm;
+		if (typeof v === 'number') return v;
+		const legacy = wall.sectionHeightsMm?.[segIdx];
+		if (typeof legacy === 'number') return legacy;
 		return wall.defaults.defaultHeightMm ?? 0;
 	}
 
-	function setSectionHeight(segIdx: number, valueMm: number | null) {
+	/** Read the end height for section i. Same fall-through pattern as start. */
+	function sectionEndMm(wall: ReturnType<typeof activeWall>, segIdx: number): number {
+		if (!wall) return 0;
+		const v = wall.sectionHeights?.[segIdx]?.endMm;
+		if (typeof v === 'number') return v;
+		const legacy = wall.sectionHeightsMm?.[segIdx];
+		if (typeof legacy === 'number') return legacy;
+		return wall.defaults.defaultHeightMm ?? 0;
+	}
+
+	/** Average of start/end — used for m² area calc per section. */
+	function sectionAvgMm(wall: ReturnType<typeof activeWall>, segIdx: number): number {
+		return (sectionStartMm(wall, segIdx) + sectionEndMm(wall, segIdx)) / 2;
+	}
+
+	/** Ensure `wall.sectionHeights[segIdx]` exists, returning a writable copy
+	 *  of the full array along with the resolved index. */
+	function ensureHeightsRow(w: ReturnType<typeof activeWall>, segIdx: number) {
+		if (!w) return null;
+		const arr = Array.isArray(w.sectionHeights) ? w.sectionHeights.slice() : [];
+		while (arr.length <= segIdx) arr.push({ startMm: null, endMm: null });
+		arr[segIdx] = { ...arr[segIdx] };
+		return arr;
+	}
+
+	/**
+	 * Set start height for section `segIdx`. The end of section i-1 is the
+	 * SAME ground point as the start of section i — so editing one updates
+	 * the other to keep the chained heights consistent.
+	 */
+	function setSectionStartHeight(segIdx: number, valueMm: number | null) {
 		const w = activeWall();
 		if (!w) return;
-		const arr = Array.isArray(w.sectionHeightsMm) ? w.sectionHeightsMm.slice() : [];
-		while (arr.length <= segIdx) arr.push(null);
-		arr[segIdx] = valueMm;
-		w.sectionHeightsMm = arr;
+		const arr = ensureHeightsRow(w, segIdx);
+		if (!arr) return;
+		arr[segIdx].startMm = valueMm;
+		// Mirror to previous section's end if it exists.
+		if (segIdx > 0) {
+			arr[segIdx - 1] = { ...arr[segIdx - 1], endMm: valueMm };
+		}
+		w.sectionHeights = arr;
+		// Mirror to legacy array for downstream readers using the average.
+		syncLegacyHeights(w);
 		mapVersion++;
 		scheduleSave();
+	}
+
+	/**
+	 * Set end height for section `segIdx`. Mirrors to the next section's
+	 * start to maintain the chain (end[i] === start[i+1]).
+	 */
+	function setSectionEndHeight(segIdx: number, valueMm: number | null) {
+		const w = activeWall();
+		if (!w) return;
+		const arr = ensureHeightsRow(w, segIdx);
+		if (!arr) return;
+		arr[segIdx].endMm = valueMm;
+		if (segIdx + 1 < arr.length) {
+			arr[segIdx + 1] = { ...arr[segIdx + 1], startMm: valueMm };
+		}
+		w.sectionHeights = arr;
+		syncLegacyHeights(w);
+		mapVersion++;
+		scheduleSave();
+	}
+
+	/** Keep the legacy flat `sectionHeightsMm` array in sync with the new
+	 *  chained model — value = avg(start, end), or null when both are null.
+	 *  Older PDF / takeoff code that reads the legacy field stays sensible. */
+	function syncLegacyHeights(w: ReturnType<typeof activeWall>) {
+		if (!w) return;
+		const heights = w.sectionHeights ?? [];
+		w.sectionHeightsMm = heights.map((h) => {
+			if (h.startMm == null && h.endMm == null) return null;
+			const s = h.startMm ?? h.endMm ?? null;
+			const e = h.endMm ?? h.startMm ?? null;
+			if (s == null || e == null) return null;
+			return Math.round((s + e) / 2);
+		});
 	}
 
 	function deleteSection(segIdx: number) {
@@ -211,8 +292,9 @@
 			pathGeoJson: null,
 			posts: [],
 			sectionHeightsMm: [],
+			sectionHeights: [],
 			defaults: {
-				boundaryOffsetMm: 100,
+				boundaryOffsetMm: 300,
 				panelModuleMm: 200,
 				postSpacingMm: 2400,
 				concreteStrength: 'N25' as const,
@@ -305,12 +387,91 @@
 		scheduleSave();
 	}
 
+	// --- snap helpers ------------------------------------------------------
+	/** Snap tolerance in metres for clicks. At zoom 19 a metre is ~15 px so
+	 *  1.2 m gives "if your click lands clearly within snap range" without
+	 *  fighting the user when they're trying to place a point next to an
+	 *  existing one. */
+	const SNAP_DISTANCE_M = 1.2;
+
+	type SnapKind = 'vertex' | 'offset' | 'angle';
+	type SnapResult = { snapped: LngLat; kind: SnapKind; label: string } | null;
+
+	/**
+	 * Find the nearest snap target for a candidate draw point.
+	 *
+	 * Priority order:
+	 *  1) Snap to an existing wall vertex (any wall, any sub-segment endpoint).
+	 *     This is the strongest tie because endpoints are intentional anchors
+	 *     — most "start a new wall at the end of the last one" actions land
+	 *     here.
+	 *  2) Snap to the active wall's boundary-offset line. Lets the user draw
+	 *     a wall that hugs the set-back line without having to click pixel-
+	 *     perfect.
+	 *  3) Snap to a 0/90/180/270° angle relative to a pivot (if `pivot` and
+	 *     `prevDir` are given — used by the second-click branch).
+	 */
+	function snapDrawPoint(
+		candidate: LngLat,
+		opts: { pivot?: LngLat; prevDir?: LngLat } = {}
+	): SnapResult {
+		// 1) Endpoints of any wall sub-segment.
+		let bestVertex: { ll: LngLat; distM: number; wallName: string } | null = null;
+		for (const w of data.walls) {
+			const segs = pathToSegments(w.pathGeoJson ?? null);
+			segs.forEach((seg) => {
+				if (seg.length < 1) return;
+				const endpoints: LngLat[] = [seg[0], seg[seg.length - 1]];
+				for (const v of endpoints) {
+					const d = haversineMeters(candidate, v);
+					if (d <= SNAP_DISTANCE_M && (!bestVertex || d < bestVertex.distM)) {
+						bestVertex = { ll: v, distM: d, wallName: w.name };
+					}
+				}
+			});
+		}
+		if (bestVertex !== null) {
+			const v = bestVertex as { ll: LngLat; distM: number; wallName: string };
+			return { snapped: v.ll, kind: 'vertex', label: `↳ ${v.wallName} end` };
+		}
+
+		// 2) Active wall's offset (set-back) line.
+		const aw = activeWall();
+		if (aw) {
+			const offsetM = (aw.defaults.boundaryOffsetMm ?? 300) / 1000;
+			const segs = pathToSegments(aw.pathGeoJson ?? null);
+			let best: { ll: LngLat; distM: number } | null = null;
+			for (const seg of segs) {
+				if (seg.length < 2) continue;
+				const off = offsetPolyline(seg, offsetM);
+				if (off.length < 2) continue;
+				const hit = projectPointOnPolyline(candidate, off);
+				if (hit && hit.distanceM <= SNAP_DISTANCE_M && (!best || hit.distanceM < best.distM)) {
+					best = { ll: hit.snapped, distM: hit.distanceM };
+				}
+			}
+			if (best !== null) {
+				const b = best as { ll: LngLat; distM: number };
+				return { snapped: b.ll, kind: 'offset', label: 'offset line' };
+			}
+		}
+
+		// 3) Angle snap (only when we have a pivot + a prior direction).
+		if (opts.pivot && opts.prevDir) {
+			const ang = snapAngle({ prev: opts.prevDir, pivot: opts.pivot, candidate });
+			if (ang) {
+				return { snapped: ang.snapped, kind: 'angle', label: `${ang.angleDeg}°` };
+			}
+		}
+		return null;
+	}
+
 	// --- click logic -------------------------------------------------------
 	/**
-	 * Two-click drawing: first click stores the start, second click commits
-	 * the line as a fresh 2-vertex sub-segment and snaps the tool back to Pan.
-	 * Snap-to-90° kicks in on the second click if the new segment lines up
-	 * within tolerance against the previous most-recent sub-segment's last edge.
+	 * Two-click drawing: first click stores the start (snapped to any nearby
+	 * wall endpoint), second click commits the line and tool flips back to Pan.
+	 * The second click also tries the offset line and a 90° angle snap against
+	 * the previous sub-segment.
 	 */
 	function handleMapClick(lngLat: LngLat) {
 		if (tool !== 'draw') return;
@@ -318,23 +479,25 @@
 		if (!w) return;
 
 		if (pendingStart === null) {
-			pendingStart = lngLat;
+			// First click — try to snap to an existing wall endpoint or the
+			// offset line so a "new wall" cleanly latches onto prior geometry.
+			const snap = snapDrawPoint(lngLat);
+			pendingStart = snap?.snapped ?? lngLat;
 			return;
 		}
 
-		// Second click — commit the line, with optional snap against the
-		// previous sub-segment if one exists for context.
-		let end: LngLat = lngLat;
+		// Second click — try snapping to vertex, offset, or 90° angle (in that
+		// priority). When no priority snap matches, the candidate is used raw.
 		const segs = segments();
 		const last = segs[segs.length - 1];
-		if (last && last.length >= 2) {
-			const snap = snapAngle({
-				prev: last[last.length - 2],
-				pivot: last[last.length - 1],
-				candidate: lngLat
-			});
-			if (snap) end = snap.snapped;
-		}
+		const pivot = pendingStart;
+		const prevDir =
+			last && last.length >= 2 ? last[last.length - 2] : segs[segs.length - 1]?.[0];
+		const snap = snapDrawPoint(lngLat, {
+			pivot,
+			prevDir: prevDir as LngLat | undefined
+		});
+		const end: LngLat = snap?.snapped ?? lngLat;
 
 		const updated = [...segs, [pendingStart, end] as LngLat[]];
 		setSegments(updated);
@@ -518,38 +681,45 @@
 					}
 				});
 
+				// Other walls — slightly faded; thinner than the active wall so
+				// the active one reads as "in focus".
 				m.addLayer({
 					id: 'walls-other-line',
 					source: 'walls-other',
 					type: 'line',
-					paint: { 'line-color': '#ff8a1c', 'line-width': 3, 'line-opacity': 0.45 }
+					paint: { 'line-color': '#ff8a1c', 'line-width': 1.6, 'line-opacity': 0.55 }
 				});
 
+				// Offset (set-back) line — dashed, green so it visually pairs with
+				// the green snap hint and the green start-dot when drawing. Sits
+				// behind the wall line so the wall reads as primary.
 				m.addLayer({
 					id: 'wall-active-offset-line',
 					source: 'wall-active-offset',
 					type: 'line',
 					paint: {
-						'line-color': '#ff8a1c',
-						'line-width': 1,
-						'line-opacity': 0.55,
+						'line-color': '#7fd99a',
+						'line-width': 1.4,
+						'line-opacity': 0.85,
 						'line-dasharray': [3, 3]
 					}
 				});
 
+				// Active wall — thinner than before; reference designs use ~2.5px
+				// so the wall sits clearly on the satellite without burying detail.
 				m.addLayer({
 					id: 'wall-active-line',
 					source: 'wall-active',
 					type: 'line',
 					paint: {
 						'line-color': '#ff8a1c',
-						'line-width': 4
+						'line-width': 2.5
 					}
 				});
 
-				// Focused-section overlay — same source, but filtered to the
-				// single segIdx in `focusedSectionIdx`. Renders on top with a
-				// brighter / thicker stroke so it pops as "selected".
+				// Focused-section overlay — same source, filtered to the single
+				// segIdx in `focusedSectionIdx`. Slightly thicker + brighter so
+				// the selected section pops without dwarfing the unfocused parts.
 				m.addLayer({
 					id: 'wall-active-focused',
 					source: 'wall-active',
@@ -557,7 +727,7 @@
 					filter: ['==', ['get', 'segIdx'], -1],
 					paint: {
 						'line-color': '#ffd28a',
-						'line-width': 7,
+						'line-width': 5,
 						'line-opacity': 0.95
 					}
 				});
@@ -722,35 +892,49 @@
 
 	function onMapMouseMove(e: MapMouseEvent) {
 		if (!mapInstance) return;
-		if (tool !== 'draw' || pendingStart === null) {
+		if (tool !== 'draw') {
 			clearHover();
 			return;
 		}
 		const ll: LngLat = [e.lngLat.lng, e.lngLat.lat];
 
-		// Snap the preview against the previous sub-segment's last edge if there
-		// is one — gives the user a green confirmation that the new line will
-		// land at 0° / 90° / 180° / 270° relative to existing geometry.
-		let endPoint: LngLat = ll;
-		let snapHit: ReturnType<typeof snapAngle> = null;
-		const segs = segments();
-		const last = segs[segs.length - 1];
-		if (last && last.length >= 2) {
-			snapHit = snapAngle({
-				prev: last[last.length - 2],
-				pivot: last[last.length - 1],
-				candidate: ll
-			});
-			if (snapHit) endPoint = snapHit.snapped;
+		// Pending start === null → user is about to click the START of a line.
+		// Preview the vertex/offset snap so they see where the start will land.
+		if (pendingStart === null) {
+			const startSnap = snapDrawPoint(ll);
+			if (startSnap) {
+				snapHintLabel = `snap → ${startSnap.label}`;
+				snapHintCoords = [startSnap.snapped, ll];
+				setSnapHint(snapHintCoords);
+			} else {
+				snapHintLabel = '';
+				snapHintCoords = null;
+				setSnapHint(null);
+			}
+			setHoverGhost(null);
+			return;
 		}
 
+		// Pending start set → preview the line from start to candidate end,
+		// snapped against vertex / offset line / 90° angle (priority order).
+		const segs = segments();
+		const last = segs[segs.length - 1];
+		const prevDir =
+			last && last.length >= 2 ? last[last.length - 2] : segs[segs.length - 1]?.[0];
+		const snap = snapDrawPoint(ll, {
+			pivot: pendingStart,
+			prevDir: prevDir as LngLat | undefined
+		});
+		const endPoint: LngLat = snap?.snapped ?? ll;
+
 		setHoverGhost([pendingStart, endPoint]);
-		if (snapHit) {
+		if (snap) {
 			snapHintCoords = [pendingStart, endPoint];
-			snapHintLabel = `${snapHit.angleDeg}°`;
+			snapHintLabel = `snap → ${snap.label}`;
 			setSnapHint(snapHintCoords);
 		} else {
 			snapHintCoords = null;
+			snapHintLabel = '';
 			setSnapHint(null);
 		}
 	}
@@ -759,6 +943,7 @@
 		setHoverGhost(null);
 		setSnapHint(null);
 		snapHintCoords = null;
+		snapHintLabel = '';
 	}
 
 	function setPendingStartMarker(coord: LngLat | null) {
@@ -922,7 +1107,7 @@
 		const aId = activeWallId;
 		const aWall = data.walls.find((w) => w.id === aId);
 		const aSegments = aWall ? pathToSegments(aWall.pathGeoJson ?? null) : [];
-		const offsetMm = aWall?.defaults.boundaryOffsetMm ?? 100;
+		const offsetMm = aWall?.defaults.boundaryOffsetMm ?? 300;
 
 		// Other walls — every sub-segment tagged with wallId + segIdx so a
 		// click on a faded wall can route to selectWall() with the right id.
@@ -1034,14 +1219,12 @@
 			}
 		}
 
-		// Offset distance label — only meaningful when the offset is large
-		// enough to render with visual separation from the wall. At a typical
-		// 100 mm boundary offset and zoom 19, the wall and offset line are 3-4
-		// pixels apart so the label just sits on top of the wall and reads as
-		// noise. Show only for offsets ≥ 500 mm; smaller offsets are still
-		// visible via the dashed parallel line itself plus the value in the
-		// wall settings panel.
-		if (mlCtors && aWall && offsetMm >= 500) {
+		// Offset distance label — show once the offset is at least 250 mm
+		// (AS 4678 minimum). At a typical 300 mm offset and zoom 19, the wall
+		// and offset line are ~10 px apart so the label sits between them with
+		// room to read. Smaller offsets are still visible via the dashed line
+		// itself plus the value in the wall settings panel.
+		if (mlCtors && aWall && offsetMm >= 250) {
 			let longestSeg: LngLat[] | null = null;
 			let longestLen = 0;
 			for (const seg of aSegments) {
@@ -1214,14 +1397,16 @@
 
 	const activeWallSegmentCount = $derived(() => segments().length);
 
-	/** Render-helpers for the side panel — shape: per-active-wall list of
-	 *  sub-segments, each with edges and lengths. */
+	/** Render-helpers for the side panel — per-active-wall list of sub-segments,
+	 *  each with edges, lengths, and chained start/end retained heights. */
 	const sidebarSegments = $derived(() => {
 		const w = activeWall();
 		if (!w)
 			return [] as Array<{
 				length: number;
-				heightMm: number;
+				startMm: number;
+				endMm: number;
+				avgMm: number;
 				m2: number;
 				edges: Array<{ length: number }>;
 			}>;
@@ -1232,9 +1417,11 @@
 				edges.push({ length: haversineMeters(seg[i], seg[i + 1]) });
 			}
 			const length = polylineLengthMeters(seg);
-			const heightMm = sectionHeightMm(w, idx);
-			const m2 = length * (heightMm / 1000);
-			return { length, heightMm, m2, edges };
+			const startMm = sectionStartMm(w, idx);
+			const endMm = sectionEndMm(w, idx);
+			const avgMm = (startMm + endMm) / 2;
+			const m2 = length * (avgMm / 1000);
+			return { length, startMm, endMm, avgMm, m2, edges };
 		});
 	});
 
@@ -1569,13 +1756,34 @@
 			</button>
 		</div>
 
+		<div class="map-legend" aria-label="Map legend">
+			<span class="legend-row">
+				<span class="legend-swatch wall" aria-hidden="true"></span>
+				<span>Wall</span>
+			</span>
+			<span class="legend-row">
+				<span class="legend-swatch offset" aria-hidden="true"></span>
+				<span>Boundary offset</span>
+			</span>
+			<span class="legend-row">
+				<span class="legend-swatch boundary" aria-hidden="true"></span>
+				<span>Property boundary</span>
+			</span>
+			{#if data.walls.length > 1}
+				<span class="legend-row">
+					<span class="legend-swatch other" aria-hidden="true"></span>
+					<span>Other walls</span>
+				</span>
+			{/if}
+		</div>
+
 		<div class="map-hint">
 			{#if tool === 'pan'}
 				Pan tool — drag to navigate, scroll/pinch to zoom. Drag a vertex to move it. Double-click a vertex to remove. Double-click the line between vertices to add one.
 			{:else if pendingStart === null}
-				Click the start of the line.
+				Click the start of the line. {#if snapHintLabel}<strong class="snap-tag">{snapHintLabel}</strong>{/if}
 			{:else}
-				Click the end. {#if snapHintLabel}<strong class="snap-tag">snap {snapHintLabel}</strong>{/if}
+				Click the end. {#if snapHintLabel}<strong class="snap-tag">{snapHintLabel}</strong>{/if}
 			{/if}
 		</div>
 
@@ -1619,6 +1827,7 @@
 							<header class="seg-head">
 								<div class="seg-head-row">
 									<span class="seg-name">Section {segIdx + 1}</span>
+									<span class="seg-len-tag">{seg.length.toFixed(2)} m</span>
 									<button
 										type="button"
 										class="seg-del"
@@ -1631,26 +1840,50 @@
 										×
 									</button>
 								</div>
-								<div class="seg-meta">
-									<span class="muted">{seg.length.toFixed(2)} m</span>
-									<span class="seg-x">×</span>
-									<label class="seg-height" title="Retained height for m² calculation">
+								<div class="seg-heights" title="Retained ground heights along this section">
+									<label class="seg-height start" title="Height at start of section">
+										<span class="seg-height-label">Start</span>
 										<input
 											type="number"
 											min="0"
 											max="5000"
 											step="50"
 											inputmode="numeric"
-											value={seg.heightMm}
+											value={seg.startMm}
 											oninput={(e) => {
 												const v = parseInt((e.currentTarget as HTMLInputElement).value, 10);
-												setSectionHeight(segIdx, Number.isFinite(v) ? v : null);
+												setSectionStartHeight(segIdx, Number.isFinite(v) ? v : null);
 											}}
-											aria-label="Section {segIdx + 1} height in millimetres"
+											aria-label="Section {segIdx + 1} start height in millimetres"
 										/>
 										<span class="unit">mm</span>
 									</label>
-									<span class="seg-eq">=</span>
+									<span class="seg-arrow" aria-hidden="true">→</span>
+									<label class="seg-height end" title="Height at end of section (= start of next section)">
+										<span class="seg-height-label">End</span>
+										<input
+											type="number"
+											min="0"
+											max="5000"
+											step="50"
+											inputmode="numeric"
+											value={seg.endMm}
+											oninput={(e) => {
+												const v = parseInt((e.currentTarget as HTMLInputElement).value, 10);
+												setSectionEndHeight(segIdx, Number.isFinite(v) ? v : null);
+											}}
+											aria-label="Section {segIdx + 1} end height in millimetres"
+										/>
+										<span class="unit">mm</span>
+									</label>
+									{#if segIdx + 1 < sidebarSegments().length}
+										<span class="chain-hint" title="End of this section equals start of Section {segIdx + 2}">⇌</span>
+									{/if}
+								</div>
+								<div class="seg-area">
+									<span class="muted small">
+										avg {Math.round(seg.avgMm)} mm × {seg.length.toFixed(2)} m
+									</span>
 									<strong class="seg-m2">{seg.m2.toFixed(2)} m²</strong>
 								</div>
 							</header>
@@ -1940,6 +2173,123 @@
 		margin-left: 0.4rem;
 	}
 
+	/* Map legend — bottom-right of the map. Compact swatch + label rows that
+	 * mirror the actual paint properties of each layer, so the colour key on
+	 * the map is "this is what these strokes mean". */
+	.map-legend {
+		position: absolute;
+		bottom: 0.6rem;
+		right: 0.6rem;
+		background: rgba(11, 11, 12, 0.88);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		padding: 0.45rem 0.6rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+		font-size: 0.72rem;
+		color: var(--text);
+		z-index: 2;
+		pointer-events: none;
+	}
+	.legend-row {
+		display: flex;
+		align-items: center;
+		gap: 0.45rem;
+	}
+	.legend-swatch {
+		display: inline-block;
+		width: 22px;
+		height: 4px;
+		border-radius: 1px;
+	}
+	.legend-swatch.wall {
+		background: #ff8a1c;
+		height: 3px;
+	}
+	.legend-swatch.offset {
+		background: transparent;
+		border-top: 2px dashed #7fd99a;
+		height: 0;
+	}
+	.legend-swatch.boundary {
+		background: #ff8a1c;
+		opacity: 0.7;
+		height: 2px;
+	}
+	.legend-swatch.other {
+		background: rgba(255, 138, 28, 0.55);
+		height: 2px;
+	}
+
+	/* Tighter Section length tag in the sidebar — reads as a small chip next
+	 * to the section name. */
+	.seg-len-tag {
+		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+		font-size: 0.72rem;
+		color: var(--text-muted);
+		background: rgba(255, 255, 255, 0.04);
+		padding: 0.05rem 0.35rem;
+		border-radius: 4px;
+		margin-right: auto;
+		margin-left: 0.4rem;
+	}
+
+	/* Chained start/end heights — green-tinted to make them visually stand
+	 * out from generic numeric inputs. Boss feedback: "make heights stand out
+	 * with green or something". */
+	.seg-heights {
+		display: flex;
+		align-items: center;
+		gap: 0.35rem;
+		flex-wrap: wrap;
+	}
+	.seg-arrow {
+		color: #7fd99a;
+		font-weight: 700;
+		font-size: 0.85rem;
+	}
+	.chain-hint {
+		color: #7fd99a;
+		font-weight: 700;
+		font-size: 0.85rem;
+		margin-left: 0.15rem;
+		opacity: 0.9;
+	}
+	.seg-height-label {
+		font-size: 0.65rem;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		font-weight: 700;
+		color: #7fd99a;
+		margin-right: 0.15rem;
+	}
+	.seg-height.start,
+	.seg-height.end {
+		background: rgba(127, 217, 154, 0.08);
+		border: 1px solid rgba(127, 217, 154, 0.35);
+		border-radius: 6px;
+		padding: 0.18rem 0.35rem;
+	}
+	.seg-height.start input,
+	.seg-height.end input {
+		background: var(--bg);
+		border: 1px solid rgba(127, 217, 154, 0.5);
+	}
+	.seg-height.start input:focus,
+	.seg-height.end input:focus {
+		border-color: #7fd99a;
+		box-shadow: 0 0 0 2px rgba(127, 217, 154, 0.25);
+	}
+	.seg-area {
+		display: flex;
+		justify-content: space-between;
+		align-items: baseline;
+		gap: 0.5rem;
+		font-size: 0.78rem;
+		margin-top: 0.2rem;
+	}
+
 	.layout {
 		display: grid;
 		grid-template-columns: minmax(0, 1fr) 18rem;
@@ -2052,18 +2402,6 @@
 	.seg-del:hover {
 		color: var(--danger);
 		border-color: var(--danger);
-	}
-	.seg-meta {
-		display: flex;
-		align-items: center;
-		gap: 0.4rem;
-		font-weight: 500;
-		font-size: 0.78rem;
-		flex-wrap: wrap;
-	}
-	.seg-x,
-	.seg-eq {
-		color: var(--text-muted);
 	}
 	.seg-height {
 		display: inline-flex;
@@ -2262,8 +2600,8 @@
 	}
 	:global(.edge-label--offset) {
 		background: rgba(11, 11, 12, 0.92);
-		color: #d8f0bf;
-		border: 1px solid rgba(168, 224, 179, 0.7);
+		color: #c8efb1;
+		border: 1px solid rgba(127, 217, 154, 0.85);
 		font-size: 10px;
 		padding: 2px 6px;
 	}

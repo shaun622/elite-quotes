@@ -214,6 +214,43 @@ export function nearestSegment(
 }
 
 /**
+ * Project a point onto a polyline, returning the closest point ON the line
+ * (snapped), the distance from the original point in metres, and the edge
+ * index that contains the snapped point. Used by Step 2's snap-to-offset-line
+ * behaviour — when the user clicks within tolerance of the offset (set-back)
+ * line, we move the click onto the line instead.
+ */
+export function projectPointOnPolyline(
+	p: LngLat,
+	coords: LngLat[]
+): { snapped: LngLat; distanceM: number; edgeIdx: number } | null {
+	if (coords.length < 2) return null;
+	const origin = coords[0];
+	const lp = lngLatToLocal(p, origin);
+	let best: { snapped: LngLat; distanceM: number; edgeIdx: number } | null = null;
+	for (let i = 0; i < coords.length - 1; i++) {
+		const la = lngLatToLocal(coords[i], origin);
+		const lb = lngLatToLocal(coords[i + 1], origin);
+		const dx = lb.x - la.x;
+		const dy = lb.y - la.y;
+		const lenSq = dx * dx + dy * dy;
+		if (lenSq === 0) continue;
+		let t = ((lp.x - la.x) * dx + (lp.y - la.y) * dy) / lenSq;
+		t = Math.max(0, Math.min(1, t));
+		const projLocal = { x: la.x + t * dx, y: la.y + t * dy };
+		const d = Math.hypot(lp.x - projLocal.x, lp.y - projLocal.y);
+		if (!best || d < best.distanceM) {
+			best = {
+				snapped: localToLngLat(projLocal, origin),
+				distanceM: d,
+				edgeIdx: i
+			};
+		}
+	}
+	return best;
+}
+
+/**
  * Anchor point for a "300 mm" style offset distance label, sitting half-way
  * between a wall segment and its parallel offset line. Caller chooses which
  * side of the segment the offset is on (positive = left of travel).

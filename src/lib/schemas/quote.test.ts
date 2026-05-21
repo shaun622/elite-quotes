@@ -54,8 +54,34 @@ describe('QuoteDataSchema', () => {
 		});
 		expect(q.walls[0].defaults.postSpacingMm).toBe(2400);
 		expect(q.walls[0].defaults.panelModuleMm).toBe(200);
-		expect(q.walls[0].defaults.boundaryOffsetMm).toBe(100);
+		// 300mm matches AS 4678 typical residential boundary set-back.
+		expect(q.walls[0].defaults.boundaryOffsetMm).toBe(300);
 		expect(q.walls[0].defaults.concreteStrength).toBe('N25');
+	});
+
+	it('defaults sectionHeights to an empty array on a fresh wall', () => {
+		const q: QuoteData = QuoteDataSchema.parse({
+			walls: [{ id: 'w1', name: 'Wall 1' }]
+		});
+		expect(q.walls[0].sectionHeights).toEqual([]);
+	});
+
+	it('round-trips a wall with chained sectionHeights', () => {
+		const q: QuoteData = QuoteDataSchema.parse({
+			walls: [
+				{
+					id: 'w1',
+					name: 'Wall 1',
+					sectionHeights: [
+						{ startMm: 600, endMm: 800 },
+						{ startMm: 800, endMm: 1200 }
+					]
+				}
+			]
+		});
+		expect(q.walls[0].sectionHeights[0].endMm).toBe(q.walls[0].sectionHeights[1].startMm);
+		const cloned = QuoteDataSchema.parse(JSON.parse(JSON.stringify(q)));
+		expect(cloned.walls[0].sectionHeights).toEqual(q.walls[0].sectionHeights);
 	});
 
 	it('rejects an invalid Australian postcode shape', () => {
