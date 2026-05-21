@@ -13,6 +13,7 @@
 		snapToPanelModule
 	} from '$lib/engineering';
 	import { findLinkForPost } from '$lib/wall-links';
+	import { retainedAtDistance } from '$lib/wall-heights';
 
 	type SaveState = 'idle' | 'saving' | 'saved' | 'conflict' | 'error';
 
@@ -137,18 +138,26 @@
 	/**
 	 * Ensure data.walls[active].posts has the right number of entries to match
 	 * the derived post distances. Preserves existing rgl/ngl values; appends
-	 * defaults for any new posts; trims if fewer.
+	 * new posts pre-seeded with the interpolated retained height from Step 2's
+	 * section start/end heights, so the elevation chart picks up the wall's
+	 * slope without the user re-entering values per post.
 	 */
 	function ensurePosts() {
 		const w = activeWall();
 		if (!w) return;
-		const target = postDistancesM().length;
+		const distances = postDistancesM();
+		const target = distances.length;
 		if (w.posts.length === target) return;
 		const next = w.posts.slice(0, target);
 		while (next.length < target) {
+			const idx = next.length;
+			// Seed RGL from Step 2's chained section heights at this post's
+			// distance along the wall. NGL stays at 0 (relative datum) until
+			// the user drags it or supplies a real NGL via the chart.
+			const rglMm = retainedAtDistance(w, distances[idx] ?? 0);
 			next.push({
-				index: next.length,
-				rglMm: 0,
+				index: idx,
+				rglMm,
 				nglMm: 0,
 				pierDiameterMm: null,
 				embedmentMm: null
@@ -157,6 +166,34 @@
 		// Re-index in case we trimmed
 		next.forEach((p, i) => (p.index = i));
 		w.posts = next;
+	}
+
+	/**
+	 * Bulk action: re-seed every post's RGL from the current Step 2 section
+	 * heights. Useful when the user has gone back to Step 2, adjusted the
+	 * start/end heights, and now wants Step 3 to reflect those changes.
+	 *
+	 * NGL is left untouched — the user may have set real ground levels via
+	 * the elevation chart that we shouldn't blow away.
+	 */
+	function reseedRglFromStep2() {
+		const w = activeWall();
+		if (!w) return;
+		const distances = postDistancesM();
+		for (let i = 0; i < w.posts.length; i++) {
+			w.posts[i].rglMm = retainedAtDistance(w, distances[i] ?? 0);
+		}
+		scheduleSave();
+	}
+
+	/** What the auto-seeded RGL WOULD be for post i — used for the sidebar
+	 *  hint that lets the user spot drift between their dragged values and
+	 *  the Step 2 source-of-truth. */
+	function suggestedRglMm(postIdx: number): number {
+		const w = activeWall();
+		if (!w) return 0;
+		const distances = postDistancesM();
+		return retainedAtDistance(w, distances[postIdx] ?? 0);
 	}
 
 	$effect(() => {
@@ -609,6 +646,14 @@
 				</svg>
 
 				<div class="chart-actions">
+					<button
+						type="button"
+						class="btn ghost reseed"
+						onclick={reseedRglFromStep2}
+						title="Re-interpolate every post's RGL from Step 2's section start/end heights"
+					>
+						⇌ Reseed RGL from Step 2
+					</button>
 					<button type="button" class="btn ghost" onclick={applyRglToAll}>
 						Apply RGL to all posts
 					</button>
@@ -634,6 +679,8 @@
 						{#each w.posts as post, i (i)}
 							{@const retained = Math.max(0, post.rglMm - post.nglMm)}
 							{@const link = linkForPost(w.id, i)}
+							{@const suggested = suggestedRglMm(i)}
+							{@const drift = Math.abs(post.rglMm - suggested) > 1}
 							<li>
 								<button
 									type="button"
@@ -646,6 +693,22 @@
 										Ø{pierFor(retained)} · {embedFor(retained)} embed
 									</span>
 								</button>
+								{#if drift}
+									<button
+										type="button"
+										class="step2-hint"
+										title="Step 2 section heights interpolated to {suggested} mm at this post. Click to apply."
+										onclick={() => {
+											const wAct = activeWall();
+											if (wAct) {
+												wAct.posts[i].rglMm = suggested;
+												scheduleSave();
+											}
+										}}
+									>
+										Step 2: {suggested} mm
+									</button>
+								{/if}
 								{#if link}
 									<button
 										type="button"
@@ -955,6 +1018,37 @@
 	}
 	.btn.ghost:hover:not(:disabled) {
 		border-color: var(--text-muted);
+	}
+	/* Reseed-from-Step-2 — green-tinted to signal "pulls from the Step 2
+	 * section heights you've entered" and visually pair with Step 2's
+	 * green height inputs. */
+	.btn.ghost.reseed {
+		background: rgba(127, 217, 154, 0.08);
+		border-color: rgba(127, 217, 154, 0.55);
+		color: #c8efb1;
+	}
+	.btn.ghost.reseed:hover:not(:disabled) {
+		background: rgba(127, 217, 154, 0.15);
+		border-color: #7fd99a;
+	}
+	.step2-hint {
+		align-self: flex-start;
+		margin-left: 3rem;
+		margin-bottom: 0.25rem;
+		background: rgba(127, 217, 154, 0.12);
+		border: 1px solid rgba(127, 217, 154, 0.45);
+		color: #c8efb1;
+		padding: 0.15rem 0.5rem;
+		border-radius: 999px;
+		font-size: 0.7rem;
+		font-weight: 600;
+		cursor: pointer;
+		text-align: left;
+		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	}
+	.step2-hint:hover {
+		background: rgba(127, 217, 154, 0.22);
+		color: #e6f8d4;
 	}
 
 	.sidebar {
