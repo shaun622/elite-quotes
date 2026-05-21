@@ -131,6 +131,11 @@
 	 */
 	let pendingStart = $state<LngLat | null>(null);
 
+	/** Which section in the active wall is "focused" — clicking a wall line
+	 *  on the map sets this; the sidebar highlights the matching row and the
+	 *  map renders that section's line thicker. Null = none. */
+	let focusedSectionIdx = $state<number | null>(null);
+
 	/** Top-level interaction tool. Pan = clicks ignored, just navigate.
 	 *  Always defaults to Pan on load — even on a fresh wall — so a stray
 	 *  click while the page is settling doesn't drop a point. */
@@ -216,8 +221,9 @@
 		};
 	}
 
-	function selectWall(id: string) {
+	function selectWall(id: string, focusSeg: number | null = null) {
 		activeWallId = id;
+		focusedSectionIdx = focusSeg;
 		pendingStart = null;
 		mapVersion++;
 	}
@@ -535,7 +541,25 @@
 					id: 'wall-active-line',
 					source: 'wall-active',
 					type: 'line',
-					paint: { 'line-color': '#ff8a1c', 'line-width': 4 }
+					paint: {
+						'line-color': '#ff8a1c',
+						'line-width': 4
+					}
+				});
+
+				// Focused-section overlay — same source, but filtered to the
+				// single segIdx in `focusedSectionIdx`. Renders on top with a
+				// brighter / thicker stroke so it pops as "selected".
+				m.addLayer({
+					id: 'wall-active-focused',
+					source: 'wall-active',
+					type: 'line',
+					filter: ['==', ['get', 'segIdx'], -1],
+					paint: {
+						'line-color': '#ffd28a',
+						'line-width': 7,
+						'line-opacity': 0.95
+					}
 				});
 
 				m.addLayer({
@@ -596,6 +620,23 @@
 				m.on('mouseleave', () => clearHover());
 				m.on('dblclick', onMapDblClick);
 
+				// Pointer cursor when hovering over any wall line in Pan mode —
+				// communicates that the line is clickable.
+				const setPointer = () => {
+					if (tool === 'pan' && mapInstance) {
+						mapInstance.getCanvas().style.cursor = 'pointer';
+					}
+				};
+				const clearPointer = () => {
+					if (tool === 'pan' && mapInstance) {
+						mapInstance.getCanvas().style.cursor = '';
+					}
+				};
+				m.on('mouseenter', 'walls-other-line', setPointer);
+				m.on('mouseleave', 'walls-other-line', clearPointer);
+				m.on('mouseenter', 'wall-active-line', setPointer);
+				m.on('mouseleave', 'wall-active-line', clearPointer);
+
 				mapInstance = m;
 				mapStatus = 'ready';
 				syncSourcesAndMarkers();
@@ -647,6 +688,35 @@
 	function onMapClick(e: MapMouseEvent) {
 		const target = (e.originalEvent.target as HTMLElement) ?? null;
 		if (target && target.closest('.vertex-handle')) return;
+
+		// In Pan mode, clicks on wall lines route to wall/section selection
+		// instead of falling through to the draw logic. queryRenderedFeatures
+		// gives us pixel-accurate hit testing against the rendered layers.
+		if (tool === 'pan' && mapInstance) {
+			const hits = mapInstance.queryRenderedFeatures(e.point, {
+				layers: ['walls-other-line', 'wall-active-line']
+			});
+			if (hits.length > 0) {
+				const f = hits[0];
+				const wallId = f.properties?.wallId as string | undefined;
+				const segIdx = f.properties?.segIdx;
+				const segNum = typeof segIdx === 'number' ? segIdx : null;
+				if (wallId && wallId !== activeWallId) {
+					selectWall(wallId, segNum);
+				} else if (wallId && wallId === activeWallId) {
+					focusedSectionIdx = segNum;
+					mapVersion++;
+				}
+				return;
+			}
+			// Pan-mode click on empty map clears any focused section.
+			if (focusedSectionIdx !== null) {
+				focusedSectionIdx = null;
+				mapVersion++;
+			}
+			return;
+		}
+
 		handleMapClick([e.lngLat.lng, e.lngLat.lat]);
 	}
 
@@ -774,6 +844,21 @@
 		untrack(() => setPendingStartMarker(ps));
 	});
 
+	// --- effect: filter the focused-section overlay layer ---------------
+	$effect(() => {
+		const idx = focusedSectionIdx;
+		if (!browser || !mapInstance || mapStatus !== 'ready') return;
+		try {
+			mapInstance.setFilter('wall-active-focused', [
+				'==',
+				['get', 'segIdx'],
+				idx === null ? -1 : idx
+			]);
+		} catch {
+			/* layer not yet ready */
+		}
+	});
+
 	/**
 	 * Set the length of an arbitrary edge (between vertex `edgeIdx` and
 	 * vertex `edgeIdx+1`) in segment `segIdx` of the active wall. The end
@@ -839,46 +924,48 @@
 		const aSegments = aWall ? pathToSegments(aWall.pathGeoJson ?? null) : [];
 		const offsetMm = aWall?.defaults.boundaryOffsetMm ?? 100;
 
-		// Other walls — flatten each wall's MultiLineString into a single feature collection
+		// Other walls — every sub-segment tagged with wallId + segIdx so a
+		// click on a faded wall can route to selectWall() with the right id.
 		const otherFeatures: GeoJSON.Feature[] = [];
 		for (const w of data.walls) {
 			if (w.id === aId) continue;
 			const segs = pathToSegments(w.pathGeoJson ?? null);
-			for (const seg of segs) {
+			segs.forEach((seg, si) => {
 				if (seg.length >= 2) {
 					otherFeatures.push({
 						type: 'Feature',
-						properties: { id: w.id, name: w.name },
+						properties: { wallId: w.id, wallName: w.name, segIdx: si },
 						geometry: { type: 'LineString', coordinates: seg }
 					});
 				}
-			}
+			});
 		}
 		(m.getSource('walls-other') as GeoJSONSource).setData({
 			type: 'FeatureCollection',
 			features: otherFeatures
 		});
 
-		// Active wall: one feature per renderable sub-segment.
+		// Active wall: one feature per renderable sub-segment, tagged with
+		// segIdx so a click can highlight the right section in the sidebar.
 		const activeFeatures: GeoJSON.Feature[] = [];
 		const offsetFeatures: GeoJSON.Feature[] = [];
-		for (const seg of aSegments) {
+		aSegments.forEach((seg, si) => {
 			if (seg.length >= 2) {
 				activeFeatures.push({
 					type: 'Feature',
-					properties: {},
+					properties: { wallId: aId, segIdx: si },
 					geometry: { type: 'LineString', coordinates: seg }
 				});
 				const off = offsetPolyline(seg, offsetMm / 1000);
 				if (off.length >= 2) {
 					offsetFeatures.push({
 						type: 'Feature',
-						properties: {},
+						properties: { wallId: aId, segIdx: si },
 						geometry: { type: 'LineString', coordinates: off }
 					});
 				}
 			}
-		}
+		});
 		(m.getSource('wall-active') as GeoJSONSource).setData({
 			type: 'FeatureCollection',
 			features: activeFeatures
@@ -1516,7 +1603,19 @@
 			{:else}
 				<ol class="seg-list">
 					{#each sidebarSegments() as seg, segIdx (segIdx)}
-						<li>
+						<!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
+						<li
+							class:focused={focusedSectionIdx === segIdx}
+							onclick={() => (focusedSectionIdx = segIdx)}
+							onkeydown={(e) => {
+								if (e.key === 'Enter' || e.key === ' ') {
+									e.preventDefault();
+									focusedSectionIdx = segIdx;
+								}
+							}}
+							role="button"
+							tabindex="0"
+						>
 							<header class="seg-head">
 								<div class="seg-head-row">
 									<span class="seg-name">Section {segIdx + 1}</span>
@@ -1911,6 +2010,16 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0.4rem;
+		cursor: pointer;
+		transition: border-color 0.15s, background 0.15s;
+	}
+	.seg-list > li:hover {
+		border-color: var(--text-muted);
+	}
+	.seg-list > li.focused {
+		border-color: var(--accent);
+		background: rgba(255, 138, 28, 0.06);
+		box-shadow: 0 0 0 1px var(--accent);
 	}
 	.seg-head {
 		display: flex;
