@@ -1224,11 +1224,13 @@
 				pushSegmentLabels(pathToSegments(w.pathGeoJson ?? null), 'wall-other');
 			}
 
-			// Wall name pill — offset perpendicular to the wall so it sits
-			// BESIDE the wall's edge-length label instead of stacking on top
-			// of it. For a two-vertex wall (the common case) the centroid IS
-			// the edge midpoint, which is where the length pill lives — that
-			// was the bug that made the wall length look "missing".
+			// Wall name pill — offset on the OPPOSITE side of the wall from
+			// the edge-length labels. Edge labels sit on the left of travel
+			// at +2.5 m perpendicular (offsetMeters=5 / 2); the wall name
+			// sits on the right of travel at -3 m perpendicular. That's a
+			// full ~5.5 m visual gap so the two never overlap even on a
+			// straight 2-vertex wall (the common case where the wall-name
+			// centroid IS the edge midpoint).
 			const wallNameAnchor = (segs: LngLat[][]): LngLat | null => {
 				// Find the longest sub-segment (most stable anchor for multi-
 				// segment walls) and offset perpendicular to its first edge.
@@ -1243,12 +1245,13 @@
 					}
 				}
 				if (!bestSeg) return null;
-				// Offset by ~6 metres perpendicular — clears the edge label
-				// pill at any sensible zoom while staying clearly "on" the wall.
+				// Negative offsetMeters flips to the right-hand normal, the
+				// opposite side from the boundary set-back AND the edge
+				// length labels.
 				return perpendicularLabelAnchor({
 					a: bestSeg[0],
 					b: bestSeg[1],
-					offsetMeters: 6
+					offsetMeters: -6
 				});
 			};
 			for (const w of data.walls) {
