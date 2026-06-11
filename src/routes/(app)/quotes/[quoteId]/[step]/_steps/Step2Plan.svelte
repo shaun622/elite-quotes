@@ -886,6 +886,26 @@
 		};
 	}
 
+	/** Permanently drop the auto-fetched cadastral boundary from this quote.
+	 *  Used when the fetch returned the wrong lot. `boundaryAttempted` stays
+	 *  true so we don't immediately re-fetch the same wrong polygon on the
+	 *  next visit. The user's walls are untouched. */
+	function clearBoundary() {
+		if (!data.site.propertyBoundaryGeoJson) return;
+		if (
+			!confirm(
+				'Remove the automatic property boundary from this quote? Your drawn walls are not affected.'
+			)
+		) {
+			return;
+		}
+		data.site.propertyBoundaryGeoJson = null;
+		data.site.boundaryAttempted = true;
+		clearBoundaryMarker();
+		mapVersion++;
+		scheduleSave();
+	}
+
 	type LabelKind =
 		| 'wall-active'
 		| 'wall-other'
@@ -1400,7 +1420,11 @@
 		// Boundary edge labels — one per edge of the outer ring. Offset
 		// perpendicular by ~2.5 m so the labels don't sit on the boundary
 		// line itself (consistent with wall edge labels).
-		if (mlCtors && boundary && boundary.coordinates[0]) {
+		// Gated by BOTH the boundary toggle and the labels toggle: the auto
+		// boundary's numbers belong to the boundary, so turning "Boundary"
+		// off hides the whole auto lot (line + fill + numbers + handle)
+		// without touching the user's own wall lines or wall labels.
+		if (mlCtors && showBoundary && boundary && boundary.coordinates[0]) {
 			const ring = boundary.coordinates[0];
 			for (let i = 0; i < ring.length - 1; i++) {
 				const a = ring[i] as LngLat;
@@ -2166,14 +2190,24 @@
 
 		<div class="layer-toggles" role="group" aria-label="Map layers">
 			<header class="layer-toggles-title">View</header>
-			<label>
+			<label title="The auto-fetched cadastral lot. Independent of your drawn walls.">
 				<input type="checkbox" bind:checked={showBoundary} />
-				<span>Boundary</span>
+				<span>Property boundary</span>
 			</label>
-			<label>
+			<label title="Length, height and wall-name pills on your drawn walls.">
 				<input type="checkbox" bind:checked={showLabels} />
-				<span>Labels</span>
+				<span>Wall labels</span>
 			</label>
+			{#if data.site.propertyBoundaryGeoJson}
+				<button
+					type="button"
+					class="boundary-remove"
+					onclick={clearBoundary}
+					title="Permanently remove the automatic boundary from this quote. Your walls stay."
+				>
+					✕ Remove boundary
+				</button>
+			{/if}
 		</div>
 
 		<div class="tools" role="toolbar" aria-label="Map tool">
@@ -3013,11 +3047,33 @@
 		height: 16px;
 		margin: 0;
 	}
+	/* "Remove boundary" — destructive text button under the toggles, shown
+	 * only when an auto boundary is present. Red so it reads as permanent,
+	 * distinct from the non-destructive visibility checkboxes above it. */
+	.boundary-remove {
+		margin-top: 0.15rem;
+		background: transparent;
+		border: 1px solid rgba(217, 76, 76, 0.5);
+		color: #ff9a9a;
+		font-size: 0.72rem;
+		font-weight: 600;
+		padding: 0.25rem 0.45rem;
+		border-radius: 6px;
+		cursor: pointer;
+		text-align: left;
+		white-space: nowrap;
+	}
+	.boundary-remove:hover {
+		background: rgba(217, 76, 76, 0.15);
+		border-color: rgba(217, 76, 76, 0.85);
+		color: #ffc4c4;
+	}
 
-	/* When labels are toggled off, hide every pill we render via MapLibre
-	 * markers. Boundary lengths, wall lengths, wall-name pills, offset
-	 * label and ground-level pills all use the .edge-label class. */
-	:global(.map-frame.hide-labels .edge-label) {
+	/* The Wall-labels toggle hides every pill EXCEPT the boundary's own
+	 * length labels — those belong to the property-boundary toggle so the
+	 * two controls stay fully independent. Boundary lengths, wall lengths,
+	 * wall-name, offset and ground pills otherwise all share .edge-label. */
+	:global(.map-frame.hide-labels .edge-label:not(.edge-label--boundary)) {
 		display: none !important;
 	}
 
