@@ -523,6 +523,10 @@
 	let mapInstance: MLMap | null = null;
 	let activeVertexMarkers: MLMarker[] = [];
 	let labelMarkers: MLMarker[] = [];
+	/** Single draggable ✛ handle at the boundary centroid. Lets the user
+	 *  translate the whole cadastral polygon to correct satellite-imagery
+	 *  offset (the cadastre is accurate; the imagery under it can drift). */
+	let boundaryMarker: MLMarker | null = null;
 	let mlCtors: {
 		Marker: typeof import('maplibre-gl').Marker;
 		LngLatBounds: typeof import('maplibre-gl').LngLatBounds;
@@ -829,6 +833,7 @@
 	function tearDown() {
 		clearVertexMarkers();
 		clearLabelMarkers();
+		clearBoundaryMarker();
 		mapInstance?.remove();
 		mapInstance = null;
 		mapStatus = 'idle';
@@ -842,6 +847,43 @@
 	function clearLabelMarkers() {
 		for (const m of labelMarkers) m.remove();
 		labelMarkers = [];
+	}
+
+	function clearBoundaryMarker() {
+		boundaryMarker?.remove();
+		boundaryMarker = null;
+	}
+
+	/** Average of a ring's vertices (ignoring the closing duplicate) — used
+	 *  to anchor the boundary move handle at the polygon's middle. */
+	function ringCentroid(ring: number[][]): LngLat {
+		const closed =
+			ring.length > 1 &&
+			ring[0][0] === ring[ring.length - 1][0] &&
+			ring[0][1] === ring[ring.length - 1][1];
+		const pts = closed ? ring.slice(0, -1) : ring;
+		let cx = 0;
+		let cy = 0;
+		for (const p of pts) {
+			cx += p[0];
+			cy += p[1];
+		}
+		const n = Math.max(1, pts.length);
+		return [cx / n, cy / n];
+	}
+
+	/** Shift every vertex of every ring of the property boundary by a
+	 *  lng/lat delta. Replaces the polygon object so Svelte's fine-grained
+	 *  reactivity picks up the change. */
+	function translateBoundary(dLng: number, dLat: number) {
+		const b = data.site.propertyBoundaryGeoJson;
+		if (!b) return;
+		data.site.propertyBoundaryGeoJson = {
+			type: 'Polygon',
+			coordinates: b.coordinates.map(
+				(ring) => ring.map((c) => [c[0] + dLng, c[1] + dLat]) as [number, number][]
+			)
+		};
 	}
 
 	type LabelKind =
@@ -1036,6 +1078,17 @@
 		// sources and labels live. Any incidental re-sync here would clear
 		// and re-create the dragging marker mid-gesture and break the drag.
 		if (dragging) return;
+		untrack(() => syncSourcesAndMarkers());
+	});
+
+	// Re-sync when boundary visibility or the active tool changes so the
+	// boundary move handle appears / disappears promptly (it's hidden in
+	// Draw mode and when the Boundary layer is off) without waiting for the
+	// next mapVersion bump.
+	$effect(() => {
+		showBoundary;
+		tool;
+		if (!browser || !mapInstance || mapStatus !== 'ready' || dragging) return;
 		untrack(() => syncSourcesAndMarkers());
 	});
 
@@ -1416,6 +1469,44 @@
 		// mid-gesture (see opts comment on syncSourcesAndMarkers).
 		if (opts.skipVertexMarkers) return;
 		clearVertexMarkers();
+		clearBoundaryMarker();
+
+		// Property-boundary move handle — a draggable ✛ at the polygon
+		// centroid that translates the whole boundary. The cadastre is
+		// surveyed-accurate but the satellite tiles it sits on can be offset
+		// by several metres, so the estimator nudges the lot into visual
+		// alignment. Hidden while drawing (would catch wall clicks) and when
+		// the Boundary layer is toggled off.
+		if (mlCtors && showBoundary && tool !== 'draw' && boundary && boundary.coordinates[0]) {
+			const { Marker } = mlCtors;
+			const el = document.createElement('div');
+			el.className = 'boundary-move-handle';
+			el.title = 'Drag to move the property boundary into alignment';
+			el.innerHTML =
+				'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="5 9 2 12 5 15"/><polyline points="9 5 12 2 15 5"/><polyline points="15 19 12 22 9 19"/><polyline points="19 9 22 12 19 15"/><line x1="2" x2="22" y1="12" y2="12"/><line x1="12" x2="12" y1="2" y2="22"/></svg>';
+			let lastPos = ringCentroid(boundary.coordinates[0]);
+			const marker = new Marker({ element: el, draggable: true })
+				.setLngLat(lastPos)
+				.addTo(m);
+			marker.on('dragstart', () => {
+				dragging = true;
+			});
+			marker.on('drag', () => {
+				const ll = marker.getLngLat();
+				translateBoundary(ll.lng - lastPos[0], ll.lat - lastPos[1]);
+				lastPos = [ll.lng, ll.lat];
+				// Boundary fill/outline + edge labels follow the cursor live;
+				// handles stay put so the gesture isn't interrupted.
+				syncSourcesAndMarkers({ skipVertexMarkers: true });
+			});
+			marker.on('dragend', () => {
+				dragging = false;
+				mapVersion++;
+				scheduleSave();
+			});
+			boundaryMarker = marker;
+		}
+
 		if (mlCtors && aWall) {
 			const { Marker } = mlCtors;
 			aSegments.forEach((seg, segIdx) => {
@@ -2149,7 +2240,7 @@
 
 		<div class="map-hint">
 			{#if tool === 'pan'}
-				Pan tool — drag to navigate, scroll/pinch to zoom. Drag a vertex to move it. Double-click a vertex to remove. Double-click the line between vertices to add one.
+				Pan tool — drag to navigate, scroll/pinch to zoom. Drag a vertex to move it. Double-click a vertex to remove. Double-click the line between vertices to add one.{#if data.site.propertyBoundaryGeoJson} Drag the yellow ✛ to align the property boundary with the satellite.{/if}
 			{:else if pendingStart === null}
 				Click the start of the line. {#if snapHintLabel}<strong class="snap-tag">{snapHintLabel}</strong>{/if}
 			{:else}
@@ -3048,6 +3139,32 @@
 	}
 	:global(.vertex-handle:active) {
 		cursor: grabbing;
+	}
+
+	/* Boundary move handle — yellow ✛ at the polygon centroid (matches the
+	 * yellow boundary stroke). Bigger than vertex handles so it reads as a
+	 * distinct "grab the whole lot" affordance. */
+	:global(.boundary-move-handle) {
+		width: 30px;
+		height: 30px;
+		border-radius: 50%;
+		background: rgba(255, 210, 63, 0.94);
+		border: 2px solid #1a1400;
+		color: #1a1400;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		cursor: move;
+		box-shadow: 0 2px 7px rgba(0, 0, 0, 0.55);
+		transition: transform 0.1s ease, background 0.1s ease;
+	}
+	:global(.boundary-move-handle:hover) {
+		background: #ffd23f;
+		transform: scale(1.08);
+	}
+	:global(.boundary-move-handle:active) {
+		cursor: grabbing;
+		transform: scale(1.02);
 	}
 	.photo-btn {
 		display: inline-flex;
