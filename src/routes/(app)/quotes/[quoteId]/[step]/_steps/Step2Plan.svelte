@@ -137,6 +137,17 @@
 	 *  map renders that section's line thicker. Null = none. */
 	let focusedSectionIdx = $state<number | null>(null);
 
+	/** Which vertex (point) of the active wall is selected. Clicking a vertex
+	 *  handle in Pan mode selects it — the handle highlights and a floating
+	 *  delete button appears so the point can be removed without the
+	 *  hidden double-click gesture. Null = none selected. */
+	let selectedVertex = $state<VertexRef | null>(null);
+
+	/** Edge the user is hovering in the sidebar — drives a bright overlay on
+	 *  that exact edge on the map so the sidebar row and the line connect
+	 *  visually. `{ segIdx, edgeIdx }` or null. */
+	let hoveredEdge = $state<{ segIdx: number; edgeIdx: number } | null>(null);
+
 	/** Top-level interaction tool. Pan = clicks ignored, just navigate.
 	 *  Always defaults to Pan on load — even on a fresh wall — so a stray
 	 *  click while the page is settling doesn't drop a point. */
@@ -274,6 +285,11 @@
 		if (!w) return;
 		const segs = segments();
 		if (segIdx < 0 || segIdx >= segs.length) return;
+		// Deleting a section shifts every later index — drop any stale
+		// vertex selection / section focus so they can't point at the wrong
+		// thing afterwards.
+		selectedVertex = null;
+		if (focusedSectionIdx === segIdx) focusedSectionIdx = null;
 		const updated = segs.slice();
 		updated.splice(segIdx, 1);
 		setSegments(updated);
@@ -311,6 +327,9 @@
 	function selectWall(id: string, focusSeg: number | null = null) {
 		activeWallId = id;
 		focusedSectionIdx = focusSeg;
+		// Vertex selection is per-wall; clear it when the active wall changes
+		// so a stale ref can't highlight a point on the new wall.
+		selectedVertex = null;
 		pendingStart = null;
 		mapVersion++;
 	}
@@ -353,7 +372,23 @@
 		scheduleSave();
 	}
 
+	/** Select a vertex (Pan mode) — highlights it, focuses its section in the
+	 *  sidebar, and reveals the floating delete button. */
+	function selectVertex(ref: VertexRef) {
+		selectedVertex = ref;
+		focusedSectionIdx = ref.segIdx;
+		mapVersion++;
+	}
+
+	function clearVertexSelection() {
+		if (selectedVertex === null) return;
+		selectedVertex = null;
+		mapVersion++;
+	}
+
 	function deleteVertex(ref: VertexRef) {
+		// Clear selection first so a stale ref doesn't point at a shifted index.
+		selectedVertex = null;
 		const segs = segments();
 		if (!segs[ref.segIdx]) return;
 		const seg = segs[ref.segIdx];
@@ -668,6 +703,7 @@
 				m.addSource('wall-segment-labels', { type: 'geojson', data: empty() });
 				m.addSource('snap-hint', { type: 'geojson', data: empty() });
 				m.addSource('hover-ghost', { type: 'geojson', data: empty() });
+				m.addSource('edge-highlight', { type: 'geojson', data: empty() });
 				m.addSource('pending-start', { type: 'geojson', data: empty() });
 
 				// Property boundary — solid yellow perimeter, slightly translucent fill so
@@ -764,6 +800,20 @@
 						'line-width': 1.5,
 						'line-opacity': 0.9,
 						'line-dasharray': [1, 1]
+					}
+				});
+
+				// Edge highlight — bright cyan overlay on the single edge the
+				// user is hovering in the sidebar. Renders above the wall lines
+				// so the row ↔ line link is unmistakable.
+				m.addLayer({
+					id: 'edge-highlight-line',
+					source: 'edge-highlight',
+					type: 'line',
+					paint: {
+						'line-color': '#4fd6e0',
+						'line-width': 6,
+						'line-opacity': 0.9
 					}
 				});
 
@@ -954,9 +1004,11 @@
 				}
 				return;
 			}
-			// Pan-mode click on empty map clears any focused section.
-			if (focusedSectionIdx !== null) {
+			// Pan-mode click on empty map clears any focused section and any
+			// selected vertex.
+			if (focusedSectionIdx !== null || selectedVertex !== null) {
 				focusedSectionIdx = null;
+				selectedVertex = null;
 				mapVersion++;
 			}
 			return;
@@ -1132,6 +1184,29 @@
 		} catch {
 			/* layer not yet ready */
 		}
+	});
+
+	// --- effect: bright overlay on the edge hovered in the sidebar -------
+	$effect(() => {
+		const he = hoveredEdge;
+		if (!browser || !mapInstance || mapStatus !== 'ready') return;
+		const src = mapInstance.getSource('edge-highlight') as GeoJSONSource | undefined;
+		if (!src) return;
+		const w = activeWall();
+		const segs = w ? pathToSegments(w.pathGeoJson ?? null) : [];
+		const seg = he ? segs[he.segIdx] : undefined;
+		if (!he || !seg || he.edgeIdx + 1 >= seg.length) {
+			src.setData({ type: 'FeatureCollection', features: [] });
+			return;
+		}
+		src.setData({
+			type: 'Feature',
+			properties: {},
+			geometry: {
+				type: 'LineString',
+				coordinates: [seg[he.edgeIdx], seg[he.edgeIdx + 1]]
+			}
+		});
 	});
 
 	/**
@@ -1536,11 +1611,36 @@
 			aSegments.forEach((seg, segIdx) => {
 				seg.forEach((c, vertexIdx) => {
 					const ref: VertexRef = { segIdx, vertexIdx };
+					const isSelected =
+						tool !== 'draw' &&
+						selectedVertex !== null &&
+						selectedVertex.segIdx === segIdx &&
+						selectedVertex.vertexIdx === vertexIdx;
 					const el = document.createElement('div');
-					el.className = 'vertex-handle';
+					el.className = isSelected ? 'vertex-handle selected' : 'vertex-handle';
 					const marker = new Marker({ element: el, draggable: true })
 						.setLngLat(c)
 						.addTo(m);
+
+					// Floating delete button on the selected vertex. It's a CHILD
+					// of the marker element so it travels with the point during a
+					// drag; mousedown stopPropagation stops a button press from
+					// starting a drag.
+					if (isSelected) {
+						const delBtn = document.createElement('button');
+						delBtn.type = 'button';
+						delBtn.className = 'vertex-del-float';
+						delBtn.title = 'Delete this point';
+						delBtn.setAttribute('aria-label', 'Delete this point');
+						delBtn.innerHTML =
+							'<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>';
+						delBtn.addEventListener('mousedown', (ev) => ev.stopPropagation());
+						delBtn.addEventListener('click', (ev) => {
+							ev.stopPropagation();
+							deleteVertex(ref); // handles setSegments + save + marker rebuild
+						});
+						el.appendChild(delBtn);
+					}
 
 					// Live drag — fires on every cursor frame. Update the
 					// wall's pathGeoJson directly (no mapVersion bump, no
@@ -1571,16 +1671,24 @@
 					});
 					el.addEventListener('click', (e) => {
 						e.stopPropagation();
-						if (tool !== 'draw') return;
-						// Snap the next draw click to this vertex's exact coords.
-						const segsNow = segments();
-						const v = segsNow[ref.segIdx]?.[ref.vertexIdx];
-						if (v) handleMapClick(v);
-					});
-					el.addEventListener('dblclick', (e) => {
-						e.preventDefault();
-						e.stopPropagation();
-						deleteVertex(ref);
+						if (tool === 'draw') {
+							// Snap the next draw click to this vertex's exact coords.
+							const segsNow = segments();
+							const v = segsNow[ref.segIdx]?.[ref.vertexIdx];
+							if (v) handleMapClick(v);
+							return;
+						}
+						// Pan mode → select this vertex (highlight + delete button
+						// + focus its section in the sidebar). Toggle off if the
+						// already-selected vertex is clicked again. (No dblclick
+						// handler: selecting rebuilds the markers, which would
+						// destroy the element mid double-click. The floating
+						// button + Delete key replace the old dblclick-to-delete.)
+						if (isSelected) {
+							clearVertexSelection();
+						} else {
+							selectVertex(ref);
+						}
 					});
 					activeVertexMarkers.push(marker);
 				});
@@ -1598,6 +1706,11 @@
 			tool = 'draw';
 		} else if (e.key === 'Escape') {
 			cancelDraw();
+			clearVertexSelection();
+		} else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedVertex !== null) {
+			// Delete the selected point with the keyboard once it's selected.
+			e.preventDefault();
+			deleteVertex(selectedVertex);
 		} else if ((e.key === 'z' || e.key === 'Z') && (e.ctrlKey || e.metaKey)) {
 			e.preventDefault();
 			undoLast();
@@ -2011,7 +2124,7 @@
 
 		<div class="walls-panel-head">
 			<h3>Segments</h3>
-			<span class="muted small">Type a length and hit Enter to set any edge.</span>
+			<span class="muted small">Click a point on the map to select &amp; delete it. Hover an edge to highlight it; type a length and hit Enter to set it.</span>
 		</div>
 		{#if !activeWall()}
 			<p class="muted small">Draw a wall first, then sub-segments and edges will appear here for fine-tuning.</p>
@@ -2129,7 +2242,20 @@
 									{#each seg.edges as edge, edgeIdx (edgeIdx)}
 										{@const key = `${segIdx}:${edgeIdx}`}
 										{@const showLabel = seg.edges.length > 1}
-										<li class:recent={recentlySetEdge === key}>
+										<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+										<li
+											class:recent={recentlySetEdge === key}
+											class:hovered={hoveredEdge?.segIdx === segIdx &&
+												hoveredEdge?.edgeIdx === edgeIdx}
+											onmouseenter={() => (hoveredEdge = { segIdx, edgeIdx })}
+											onmouseleave={() => {
+												if (
+													hoveredEdge?.segIdx === segIdx &&
+													hoveredEdge?.edgeIdx === edgeIdx
+												)
+													hoveredEdge = null;
+											}}
+										>
 											<div class="edge-current-row">
 												{#if showLabel}
 													<span class="edge-num">Edge {edgeIdx + 1}</span>
@@ -2137,6 +2263,18 @@
 													<span class="edge-num">Current</span>
 												{/if}
 												<strong class="edge-current">{edge.length.toFixed(2)} m</strong>
+												<button
+													type="button"
+													class="edge-del"
+													title="Delete this edge (removes its end point)"
+													aria-label="Delete Section {segIdx + 1} Edge {edgeIdx + 1}"
+													onclick={(e) => {
+														e.stopPropagation();
+														deleteVertex({ segIdx, vertexIdx: edgeIdx + 1 });
+													}}
+												>
+													✕
+												</button>
 											</div>
 											<form
 												class="edge-form"
@@ -2274,7 +2412,7 @@
 
 		<div class="map-hint">
 			{#if tool === 'pan'}
-				Pan tool — drag to navigate, scroll/pinch to zoom. Drag a vertex to move it. Double-click a vertex to remove. Double-click the line between vertices to add one.{#if data.site.propertyBoundaryGeoJson} Drag the yellow ✛ to align the property boundary with the satellite.{/if}
+				Pan tool — drag to navigate, scroll/pinch to zoom. Click a point to select it, then use its 🗑 button or the Delete key. Drag a point to move it. Double-click the line between points to add one.{#if data.site.propertyBoundaryGeoJson} Drag the yellow ✛ to align the property boundary with the satellite.{/if}
 			{:else if pendingStart === null}
 				Click the start of the line. {#if snapHintLabel}<strong class="snap-tag">{snapHintLabel}</strong>{/if}
 			{:else}
@@ -2946,19 +3084,24 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0.3rem;
-		padding: 0;
+		padding: 0.25rem 0.35rem;
+		margin: 0 -0.35rem;
 		border-radius: 6px;
-		transition: background 0.4s ease;
+		border: 1px solid transparent;
+		transition: background 0.2s ease, border-color 0.15s ease;
 	}
 	.edge-list li.recent {
 		background: rgba(74, 209, 101, 0.15);
-		padding: 0.25rem 0.35rem;
-		margin: -0.25rem -0.35rem;
+	}
+	/* Edge row hovered → cyan tint that pairs with the bright cyan overlay
+	 * drawn on that exact edge out on the map. */
+	.edge-list li.hovered {
+		background: rgba(79, 214, 224, 0.12);
+		border-color: rgba(79, 214, 224, 0.5);
 	}
 	.edge-current-row {
 		display: flex;
-		justify-content: space-between;
-		align-items: baseline;
+		align-items: center;
 		gap: 0.4rem;
 	}
 	.edge-num {
@@ -2973,6 +3116,31 @@
 		font-size: 0.92rem;
 		font-weight: 600;
 		color: var(--text);
+	}
+	/* Per-edge delete — sits at the far right of the edge row. Red on hover
+	 * so it reads as destructive without shouting when idle. */
+	.edge-del {
+		margin-left: auto;
+		flex-shrink: 0;
+		width: 22px;
+		height: 22px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		background: transparent;
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		color: var(--text-muted);
+		font-size: 0.7rem;
+		line-height: 1;
+		cursor: pointer;
+		padding: 0;
+		transition: color 0.15s, border-color 0.15s, background 0.15s;
+	}
+	.edge-del:hover {
+		color: #ff9a9a;
+		border-color: rgba(217, 76, 76, 0.7);
+		background: rgba(217, 76, 76, 0.12);
 	}
 	.edge-form {
 		display: grid;
@@ -3185,6 +3353,7 @@
 	}
 
 	:global(.vertex-handle) {
+		position: relative;
 		width: 14px;
 		height: 14px;
 		border-radius: 50%;
@@ -3195,6 +3364,51 @@
 	}
 	:global(.vertex-handle:active) {
 		cursor: grabbing;
+	}
+	/* Selected vertex — larger, accent-filled, with a glow ring so the
+	 * clicked point is unmistakable and the floating delete button has a
+	 * clear anchor. */
+	:global(.vertex-handle.selected) {
+		width: 18px;
+		height: 18px;
+		background: var(--accent);
+		border-color: #fff;
+		box-shadow: 0 0 0 2px var(--accent), 0 0 0 4px rgba(255, 138, 28, 0.35);
+		z-index: 3;
+	}
+	/* Floating "delete this point" button above a selected vertex. Child of
+	 * the marker element so it travels with the point during a drag. */
+	:global(.vertex-del-float) {
+		position: absolute;
+		bottom: calc(100% + 7px);
+		left: 50%;
+		transform: translateX(-50%);
+		width: 26px;
+		height: 26px;
+		border-radius: 50%;
+		background: var(--danger, #d94c4c);
+		color: #fff;
+		border: 2px solid #fff;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		cursor: pointer;
+		padding: 0;
+		box-shadow: 0 2px 7px rgba(0, 0, 0, 0.55);
+	}
+	:global(.vertex-del-float:hover) {
+		background: #ef5f5f;
+		transform: translateX(-50%) scale(1.1);
+	}
+	/* Little pointer connecting the delete bubble down to the vertex. */
+	:global(.vertex-del-float::after) {
+		content: '';
+		position: absolute;
+		top: 100%;
+		left: 50%;
+		transform: translateX(-50%);
+		border: 4px solid transparent;
+		border-top-color: #fff;
 	}
 
 	/* Boundary move handle — yellow ✛ at the polygon centroid (matches the
