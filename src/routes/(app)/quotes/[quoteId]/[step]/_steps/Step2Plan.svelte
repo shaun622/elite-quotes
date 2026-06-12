@@ -311,6 +311,14 @@
 			id: ulid(),
 			name,
 			pathGeoJson: null,
+			manualLengthM: null,
+			manualHeightMm: null,
+			build: {
+				retainingMaterial: 'super_sleeper' as const,
+				topperType: 'none' as const,
+				topperStyle: '',
+				topperHeightMm: 1800
+			},
 			posts: [],
 			sectionHeightsMm: [],
 			sectionHeights: [],

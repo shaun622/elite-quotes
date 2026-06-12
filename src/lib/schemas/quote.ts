@@ -106,10 +106,78 @@ const PathGeoJsonSchema = z.union([
 	})
 ]);
 
+/**
+ * Retaining-wall material. The label list shown to the user lives in
+ * `RETAINING_MATERIAL_LABELS`; the PDF line items read those labels.
+ */
+export const RETAINING_MATERIALS = [
+	'super_sleeper',
+	'concrete_sleeper',
+	'timber_sleeper',
+	'besser_block',
+	'boulder_rock',
+	'other'
+] as const;
+export type RetainingMaterial = (typeof RETAINING_MATERIALS)[number];
+export const RETAINING_MATERIAL_LABELS: Record<RetainingMaterial, string> = {
+	super_sleeper: 'super sleeper',
+	concrete_sleeper: 'concrete sleeper',
+	timber_sleeper: 'timber sleeper',
+	besser_block: 'Besser block',
+	boulder_rock: 'boulder / rock',
+	other: 'retaining wall'
+};
+
+/** Optional topper that sits on top of the retaining wall (fence/screen). */
+export const TOPPER_TYPES = [
+	'none',
+	'colorbond',
+	'timber_fence',
+	'aluminium_slat',
+	'pool_fence',
+	'other'
+] as const;
+export type TopperType = (typeof TOPPER_TYPES)[number];
+export const TOPPER_TYPE_LABELS: Record<TopperType, string> = {
+	none: 'No topper',
+	colorbond: 'Colorbond',
+	timber_fence: 'Timber fence',
+	aluminium_slat: 'Aluminium slat',
+	pool_fence: 'Pool fence',
+	other: 'Topper'
+};
+
+/**
+ * Per-wall make-up: a retaining wall (material) plus an OPTIONAL topper
+ * (Colorbond / fence / screen) sitting on top of it. Drives the two line-item
+ * styles on the resi PDF — e.g. "Install 35m of super sleeper retaining wall
+ * at 400mm high" + "Install Heritage Green Colorbond on top … at 1.8m tall".
+ */
+const WallBuildSchema = z.object({
+	retainingMaterial: z.enum(RETAINING_MATERIALS).default('super_sleeper'),
+	/** When 'none', the wall is retaining-only (no topper line item). */
+	topperType: z.enum(TOPPER_TYPES).default('none'),
+	/** Free-text style/colour, e.g. "Heritage Green". */
+	topperStyle: z.string().max(120).default(''),
+	/** Topper height in mm (uniform along the wall), e.g. 1800. */
+	topperHeightMm: z.number().int().nonnegative().default(1800)
+});
+
+export type WallBuild = z.infer<typeof WallBuildSchema>;
+
 const WallSchema = z.object({
 	id: z.string().min(1),
 	name: z.string().default('Wall 1'),
 	pathGeoJson: PathGeoJsonSchema.nullable().default(null),
+	/** Manually-entered total length (m) for walls measured off-site (tape or
+	 *  a LiDAR scanner app) without drawing on the satellite. When the wall
+	 *  has no geometry, this is the wall's effective length. Null = unset. */
+	manualLengthM: z.number().nonnegative().nullable().default(null),
+	/** Manually-entered retained height (mm) for manual-mode walls (no
+	 *  drawn sections to read heights from). Null = use defaults.defaultHeightMm. */
+	manualHeightMm: z.number().int().nonnegative().nullable().default(null),
+	/** Wall make-up: retaining material + optional topper. */
+	build: WallBuildSchema.default(() => WallBuildSchema.parse({})),
 	posts: z.array(PostSchema).default([]),
 	/** Legacy per-section retained-height overrides (mm). Index matches the
 	 *  sub-segment index in pathGeoJson. `null` means "use the wall's
@@ -210,6 +278,54 @@ const PricingSchema = z.object({
 	rates: z.record(z.string(), z.number().nonnegative()).default({})
 });
 
+/**
+ * Rate card — drives the LIVE running $ total shown while drawing on Step 2.
+ * Stored per-quote for now (seeded from the defaults below); a future PR can
+ * promote it to org-level settings so it's shared across quotes.
+ *
+ * Retaining is priced by $/lineal-metre chosen from the section's average
+ * retained height (taller bands cost more — more sleepers, deeper piers,
+ * bigger posts). Toppers are a flat $/lineal-metre by type. These produce an
+ * estimate the estimator refines on the Pricing step; they are not a binding
+ * schedule of rates.
+ */
+const RetainingBandSchema = z.object({
+	/** Upper bound of this band, inclusive, in mm. */
+	maxHeightMm: z.number().int().positive(),
+	perMetreCents: z.number().int().nonnegative()
+});
+
+/** Default retaining $/m bands (cents). Reverse-engineered from a real Elite
+ *  Walls quote: ~$300/m at 400mm, scaling up with height. */
+export const DEFAULT_RETAINING_BANDS = [
+	{ maxHeightMm: 600, perMetreCents: 30000 },
+	{ maxHeightMm: 1000, perMetreCents: 45000 },
+	{ maxHeightMm: 1400, perMetreCents: 60000 },
+	{ maxHeightMm: 2000, perMetreCents: 80000 },
+	{ maxHeightMm: 3000, perMetreCents: 105000 }
+] as const;
+
+/** Default topper $/m (cents). Colorbond ~ $200/m at 1.8m. */
+export const DEFAULT_TOPPER_RATES: Record<string, number> = {
+	colorbond: 20000,
+	timber_fence: 15000,
+	aluminium_slat: 24000,
+	pool_fence: 28000,
+	other: 18000
+};
+
+const RateCardSchema = z.object({
+	retainingBands: z
+		.array(RetainingBandSchema)
+		.default(() => DEFAULT_RETAINING_BANDS.map((b) => ({ ...b }))),
+	/** $/lineal-metre by topper type (cents). 'none' is never priced. */
+	topperPerMetreCents: z
+		.record(z.string(), z.number().int().nonnegative())
+		.default(() => ({ ...DEFAULT_TOPPER_RATES }))
+});
+
+export type RateCard = z.infer<typeof RateCardSchema>;
+
 const FlagsSchema = z.object({
 	engineerCertRequired: z.boolean().default(false),
 	surchargeLoad: z.boolean().default(false)
@@ -279,6 +395,8 @@ export const QuoteDataSchema = z.object({
 	resiQuick: ResiQuickSchema.default(() => ResiQuickSchema.parse({})),
 	allowances: z.array(AllowanceSchema).default([]),
 	materials: MaterialsSchema.default(() => MaterialsSchema.parse({})),
+	/** Rate card driving the live $ running total on Step 2. */
+	rateCard: RateCardSchema.default(() => RateCardSchema.parse({})),
 	pricing: PricingSchema.default(() => PricingSchema.parse({})),
 	meta: MetaSchema.default(() => MetaSchema.parse({}))
 });
