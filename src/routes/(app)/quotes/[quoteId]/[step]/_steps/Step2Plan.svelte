@@ -8,7 +8,13 @@
 		MapMouseEvent,
 		GeoJSONSource
 	} from 'maplibre-gl';
-	import type { Photo, QuoteData } from '$lib/schemas/quote';
+	import type { Photo, QuoteData, RetainingMaterial, TopperType } from '$lib/schemas/quote';
+	import {
+		RETAINING_MATERIALS,
+		RETAINING_MATERIAL_LABELS,
+		TOPPER_TYPES,
+		TOPPER_TYPE_LABELS
+	} from '$lib/schemas/quote';
 	import {
 		haversineMeters,
 		lngLatToLocal,
@@ -24,6 +30,7 @@
 		snapAngle,
 		type LngLat
 	} from '$lib/wall-math';
+	import { jobTotals, isManualWall, formatCents } from '$lib/wall-costing';
 
 	type SaveState = 'idle' | 'saving' | 'saved' | 'conflict' | 'error';
 	type Tool = 'pan' | 'draw';
@@ -1793,17 +1800,6 @@
 		mapInstance.fitBounds(bounds, { padding: 60, duration: 600, maxZoom: 20 });
 	}
 
-	// --- derived totals ----------------------------------------------------
-	const totals = $derived(() => {
-		const perWall = data.walls.map((w) => ({
-			id: w.id,
-			name: w.name,
-			meters: multiPolylineLengthMeters(pathToSegments(w.pathGeoJson ?? null))
-		}));
-		const total = perWall.reduce((s, p) => s + p.meters, 0);
-		return { perWall, total };
-	});
-
 	const activeWallSegmentCount = $derived(() => segments().length);
 
 	/** Render-helpers for the side panel — per-active-wall list of sub-segments,
@@ -1863,6 +1859,100 @@
 		if (!w) return;
 		if (w.defaults.concreteStrength === value) return;
 		w.defaults.concreteStrength = value;
+		scheduleSave();
+	}
+
+	// --- wall make-up (retaining material + topper) -----------------------
+	function setRetainingMaterial(value: RetainingMaterial) {
+		const w = activeWall();
+		if (!w || w.build.retainingMaterial === value) return;
+		w.build.retainingMaterial = value;
+		scheduleSave();
+	}
+	function setTopperType(value: TopperType) {
+		const w = activeWall();
+		if (!w || w.build.topperType === value) return;
+		w.build.topperType = value;
+		mapVersion++;
+		scheduleSave();
+	}
+	function setTopperStyle(value: string) {
+		const w = activeWall();
+		if (!w) return;
+		w.build.topperStyle = value;
+		scheduleSave();
+	}
+	function setTopperHeight(value: number) {
+		const w = activeWall();
+		if (!w) return;
+		w.build.topperHeightMm = Math.max(0, Math.round(value) || 0);
+		scheduleSave();
+	}
+
+	// --- manual (typed) measurement, no plan-view drawing -----------------
+	/** True when the active wall is being measured by typed length. */
+	const activeIsManual = $derived(() => {
+		const w = activeWall();
+		return w ? isManualWall(w) && w.manualLengthM !== null : false;
+	});
+
+	/** Switch the active wall to manual entry: seed its length from any
+	 *  existing geometry (so nothing is lost) and clear the drawn path. */
+	function enableManualMode() {
+		const w = activeWall();
+		if (!w) return;
+		const geomLen = multiPolylineLengthMeters(pathToSegments(w.pathGeoJson ?? null));
+		w.manualLengthM = geomLen > 0.001 ? Math.round(geomLen * 100) / 100 : (w.manualLengthM ?? 0);
+		if (w.manualHeightMm === null) {
+			w.manualHeightMm = w.defaults.defaultHeightMm ?? 600;
+		}
+		w.pathGeoJson = null;
+		selectedVertex = null;
+		focusedSectionIdx = null;
+		tool = 'pan';
+		mapVersion++;
+		scheduleSave();
+	}
+
+	/** Back to drawing — clears the manual length so the map path takes over. */
+	function disableManualMode() {
+		const w = activeWall();
+		if (!w) return;
+		w.manualLengthM = null;
+		mapVersion++;
+		scheduleSave();
+	}
+
+	function setManualLength(value: number) {
+		const w = activeWall();
+		if (!w) return;
+		w.manualLengthM = Math.max(0, Math.round((Number(value) || 0) * 100) / 100);
+		mapVersion++;
+		scheduleSave();
+	}
+	function setManualHeight(value: number) {
+		const w = activeWall();
+		if (!w) return;
+		w.manualHeightMm = Math.max(0, Math.round(Number(value) || 0));
+		mapVersion++;
+		scheduleSave();
+	}
+
+	// --- live costing summary ---------------------------------------------
+	const costing = $derived(() => jobTotals(data.walls, data.rateCard));
+	let ratesOpen = $state(false);
+
+	function setRetainingBandRate(idx: number, dollarsPerMetre: number) {
+		const band = data.rateCard.retainingBands[idx];
+		if (!band) return;
+		band.perMetreCents = Math.max(0, Math.round((Number(dollarsPerMetre) || 0) * 100));
+		scheduleSave();
+	}
+	function setTopperRate(type: string, dollarsPerMetre: number) {
+		data.rateCard.topperPerMetreCents[type] = Math.max(
+			0,
+			Math.round((Number(dollarsPerMetre) || 0) * 100)
+		);
 		scheduleSave();
 	}
 
@@ -2008,6 +2098,116 @@
 				<strong>{w.name} settings</strong>
 				<span class="muted">Applies to this wall only · changes save automatically</span>
 			</header>
+
+			<!-- Wall make-up: retaining material + optional topper. Drives the PDF line items. -->
+			<div class="makeup">
+				<h4 class="makeup-title">Wall make-up</h4>
+				<div class="makeup-grid">
+					<label>
+						<span>Retaining material</span>
+						<select
+							value={w.build.retainingMaterial}
+							onchange={(e) =>
+								setRetainingMaterial((e.currentTarget as HTMLSelectElement).value as RetainingMaterial)}
+						>
+							{#each RETAINING_MATERIALS as mat (mat)}
+								<option value={mat}>{RETAINING_MATERIAL_LABELS[mat]}</option>
+							{/each}
+						</select>
+					</label>
+					<label>
+						<span>Topper / fence on top</span>
+						<select
+							value={w.build.topperType}
+							onchange={(e) =>
+								setTopperType((e.currentTarget as HTMLSelectElement).value as TopperType)}
+						>
+							{#each TOPPER_TYPES as t (t)}
+								<option value={t}>{TOPPER_TYPE_LABELS[t]}</option>
+							{/each}
+						</select>
+					</label>
+					{#if w.build.topperType !== 'none'}
+						<label>
+							<span>Topper style / colour</span>
+							<input
+								type="text"
+								placeholder="e.g. Heritage Green"
+								value={w.build.topperStyle}
+								oninput={(e) => setTopperStyle((e.currentTarget as HTMLInputElement).value)}
+							/>
+						</label>
+						<label>
+							<span>Topper height</span>
+							<div class="input-with-unit">
+								<input
+									type="number"
+									min="0"
+									max="3000"
+									step="100"
+									value={w.build.topperHeightMm}
+									oninput={(e) =>
+										setTopperHeight(parseInt((e.currentTarget as HTMLInputElement).value, 10) || 0)}
+								/>
+								<span class="unit">mm</span>
+							</div>
+						</label>
+					{/if}
+				</div>
+
+				<!-- Measure mode: draw on the map, or type the length (LiDAR/tape). -->
+				<div class="measure-mode">
+					<span class="measure-label">Measure by</span>
+					<div class="seg-toggle" role="group" aria-label="Measure mode">
+						<button
+							type="button"
+							class:on={!activeIsManual()}
+							onclick={disableManualMode}
+						>
+							✏️ Draw on map
+						</button>
+						<button type="button" class:on={activeIsManual()} onclick={enableManualMode}>
+							⌨ Type length
+						</button>
+					</div>
+					{#if activeIsManual()}
+						<div class="manual-inputs">
+							<label>
+								<span>Length</span>
+								<div class="input-with-unit">
+									<input
+										type="number"
+										min="0"
+										step="0.1"
+										inputmode="decimal"
+										value={w.manualLengthM ?? 0}
+										oninput={(e) =>
+											setManualLength(parseFloat((e.currentTarget as HTMLInputElement).value))}
+									/>
+									<span class="unit">m</span>
+								</div>
+							</label>
+							<label>
+								<span>Retained height</span>
+								<div class="input-with-unit">
+									<input
+										type="number"
+										min="0"
+										max="5000"
+										step="50"
+										value={w.manualHeightMm ?? w.defaults.defaultHeightMm}
+										oninput={(e) =>
+											setManualHeight(parseInt((e.currentTarget as HTMLInputElement).value, 10) || 0)}
+									/>
+									<span class="unit">mm</span>
+								</div>
+							</label>
+							<small class="muted">No drawing needed — type measurements from a tape or scanner app.</small>
+						</div>
+					{/if}
+				</div>
+			</div>
+
 			<div class="settings-grid">
 				<label>
 					<span>Boundary offset</span>
@@ -2431,23 +2631,106 @@
 	</div>
 	</div>
 
-	<footer class="summary">
-		<div class="totals">
-			<div class="totals-line">
-				<span class="muted">Total wall length</span>
-				<span class="total">{totals().total.toFixed(2)} m</span>
+	<!-- Running summary below the map: live measurements + $ from the rate card. -->
+	<section class="run-summary" aria-label="Running quote summary">
+		<header class="run-summary-head">
+			<div class="run-summary-headline">
+				<span class="muted small">Running estimate</span>
+				<strong class="run-total">{formatCents(costing().totalCents)}</strong>
+				<span class="muted small">ex GST · from your rate card</span>
 			</div>
-			{#if data.walls.length > 1}
-				<ul class="per-wall">
-					{#each totals().perWall as p (p.id)}
-						<li>
-							<span class="muted">{p.name}</span>
-							<span>{p.meters.toFixed(2)} m</span>
-						</li>
-					{/each}
-				</ul>
-			{/if}
-		</div>
+			<div class="run-chips">
+				<span class="chip"><span class="muted">Retaining</span> {costing().lengthM.toFixed(1)} m</span>
+				<span class="chip"><span class="muted">Face area</span> {costing().m2.toFixed(1)} m²</span>
+				{#if costing().topperLengthM > 0}
+					<span class="chip"><span class="muted">Topper</span> {costing().topperLengthM.toFixed(1)} m</span>
+				{/if}
+				<button type="button" class="rates-btn" class:on={ratesOpen} onclick={() => (ratesOpen = !ratesOpen)}>
+					⚙ Rates
+				</button>
+			</div>
+		</header>
+
+		{#if costing().perWall.length > 0}
+			<div class="run-table" role="table">
+				<div class="run-row run-row-head" role="row">
+					<span role="columnheader">Wall</span>
+					<span role="columnheader">Length</span>
+					<span role="columnheader">Make-up</span>
+					<span role="columnheader" class="num">Retaining</span>
+					<span role="columnheader" class="num">Topper</span>
+					<span role="columnheader" class="num">Wall total</span>
+				</div>
+				{#each costing().perWall as p (p.id)}
+					{@const wall = data.walls.find((x) => x.id === p.id)}
+					<div class="run-row" role="row">
+						<span role="cell" class="run-wall-name">{p.name}</span>
+						<span role="cell">
+							{p.lengthM.toFixed(2)} m
+							{#if wall && isManualWall(wall) && wall.manualLengthM !== null}<span class="typed-tag" title="Typed, not drawn">typed</span>{/if}
+						</span>
+						<span role="cell" class="run-makeup muted">
+							{wall ? RETAINING_MATERIAL_LABELS[wall.build.retainingMaterial] : ''}{#if wall && wall.build.topperType !== 'none'} + {wall.build.topperStyle || ''} {TOPPER_TYPE_LABELS[wall.build.topperType]}{/if}
+						</span>
+						<span role="cell" class="num">{formatCents(p.retainingCents)}</span>
+						<span role="cell" class="num">{p.topperCents > 0 ? formatCents(p.topperCents) : '—'}</span>
+						<span role="cell" class="num run-wall-total">{formatCents(p.totalCents)}</span>
+					</div>
+				{/each}
+			</div>
+		{:else}
+			<p class="muted small">Draw a wall or switch a wall to "Type length" to see a running estimate.</p>
+		{/if}
+
+		{#if ratesOpen}
+			<div class="rates-editor">
+				<h4>Rate card <span class="muted small">— estimate only, refine on Pricing</span></h4>
+				<div class="rates-cols">
+					<div>
+						<span class="rates-label">Retaining $/m by height</span>
+						<ul class="rates-list">
+							{#each data.rateCard.retainingBands as band, i (i)}
+								<li>
+									<span class="muted">≤ {band.maxHeightMm} mm</span>
+									<div class="input-with-unit">
+										<span class="unit">$</span>
+										<input
+											type="number"
+											min="0"
+											step="5"
+											value={(band.perMetreCents / 100).toFixed(0)}
+											oninput={(e) => setRetainingBandRate(i, parseFloat((e.currentTarget as HTMLInputElement).value))}
+										/>
+										<span class="unit">/m</span>
+									</div>
+								</li>
+							{/each}
+						</ul>
+					</div>
+					<div>
+						<span class="rates-label">Topper $/m by type</span>
+						<ul class="rates-list">
+							{#each ['colorbond', 'timber_fence', 'aluminium_slat', 'pool_fence'] as t (t)}
+								<li>
+									<span class="muted">{TOPPER_TYPE_LABELS[t as TopperType]}</span>
+									<div class="input-with-unit">
+										<span class="unit">$</span>
+										<input
+											type="number"
+											min="0"
+											step="5"
+											value={((data.rateCard.topperPerMetreCents[t] ?? 0) / 100).toFixed(0)}
+											oninput={(e) => setTopperRate(t, parseFloat((e.currentTarget as HTMLInputElement).value))}
+										/>
+										<span class="unit">/m</span>
+									</div>
+								</li>
+							{/each}
+						</ul>
+					</div>
+				</div>
+			</div>
+		{/if}
 
 		<div class="status" role="status" aria-live="polite">
 			{#if saveState === 'saving'}
@@ -2462,7 +2745,7 @@
 				<span class="dot dot-idle"></span> Up to date (v{versionNumber})
 			{/if}
 		</div>
-	</footer>
+	</section>
 </div>
 
 <style>
@@ -3558,44 +3841,277 @@
 		50% { opacity: 0.45; }
 	}
 
-	.summary {
-		display: flex;
-		justify-content: space-between;
-		align-items: flex-start;
-		gap: 1rem;
-		flex-wrap: wrap;
-	}
-	.totals-line {
-		display: flex;
-		gap: 0.6rem;
-		align-items: baseline;
-		font-size: 0.95rem;
-	}
-	.totals-line .total {
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-weight: 600;
-		font-size: 1.1rem;
-		color: var(--text);
-	}
 	.muted {
 		color: var(--text-muted);
 	}
-	.per-wall {
-		list-style: none;
-		padding: 0;
-		margin: 0.5rem 0 0;
+
+	/* ─── Wall make-up + measure-mode (in the settings panel) ──────────── */
+	.makeup {
 		display: flex;
 		flex-direction: column;
-		gap: 0.2rem;
-		font-size: 0.8rem;
+		gap: 0.6rem;
+		padding-bottom: 0.75rem;
+		border-bottom: 1px dashed var(--border);
 	}
-	.per-wall li {
+	.makeup-title {
+		margin: 0;
+		font-size: 0.7rem;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.07em;
+		color: var(--text-muted);
+	}
+	.makeup-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+		gap: 0.7rem 1rem;
+	}
+	.makeup-grid label {
 		display: flex;
-		justify-content: space-between;
-		gap: 1rem;
-		min-width: 16rem;
+		flex-direction: column;
+		gap: 0.3rem;
+		font-size: 0.78rem;
+		color: var(--text-muted);
+	}
+	.makeup-grid select,
+	.makeup-grid input {
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		padding: 0.4rem 0.55rem;
+		color: var(--text);
+		font-size: 0.9rem;
+		outline: none;
+	}
+	.makeup-grid select:focus,
+	.makeup-grid input:focus {
+		border-color: var(--accent);
+	}
+	.measure-mode {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+	}
+	.measure-label {
+		font-size: 0.7rem;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		color: var(--text-muted);
+	}
+	.seg-toggle {
+		display: inline-flex;
+		gap: 0;
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		overflow: hidden;
+		width: fit-content;
+	}
+	.seg-toggle button {
+		background: transparent;
+		border: none;
+		color: var(--text-muted);
+		padding: 0.4rem 0.8rem;
+		font-size: 0.82rem;
+		font-weight: 600;
+		cursor: pointer;
+	}
+	.seg-toggle button.on {
+		background: var(--accent);
+		color: var(--accent-fg);
+	}
+	.manual-inputs {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+		gap: 0.6rem 1rem;
+		align-items: end;
+	}
+	.manual-inputs label {
+		display: flex;
+		flex-direction: column;
+		gap: 0.3rem;
+		font-size: 0.78rem;
+		color: var(--text-muted);
+	}
+	.manual-inputs small {
+		grid-column: 1 / -1;
+		font-size: 0.7rem;
 	}
 
+	/* ─── Running summary below the map ────────────────────────────────── */
+	.run-summary {
+		background: var(--surface);
+		border: 1px solid var(--border);
+		border-radius: 12px;
+		padding: 0.875rem 1rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+	}
+	.run-summary-head {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		gap: 1rem;
+		flex-wrap: wrap;
+	}
+	.run-summary-headline {
+		display: flex;
+		align-items: baseline;
+		gap: 0.6rem;
+		flex-wrap: wrap;
+	}
+	.run-total {
+		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+		font-size: 1.6rem;
+		font-weight: 700;
+		color: var(--accent);
+		line-height: 1;
+	}
+	.run-chips {
+		display: flex;
+		gap: 0.4rem;
+		align-items: center;
+		flex-wrap: wrap;
+	}
+	.chip {
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-radius: 999px;
+		padding: 0.25rem 0.6rem;
+		font-size: 0.78rem;
+		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+		font-weight: 600;
+	}
+	.chip .muted {
+		font-weight: 400;
+		font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+		font-size: 0.7rem;
+	}
+	.rates-btn {
+		background: transparent;
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		color: var(--text);
+		padding: 0.3rem 0.6rem;
+		font-size: 0.78rem;
+		font-weight: 600;
+		cursor: pointer;
+	}
+	.rates-btn.on {
+		background: rgba(255, 138, 28, 0.15);
+		border-color: var(--accent);
+		color: var(--accent);
+	}
+
+	.run-table {
+		display: flex;
+		flex-direction: column;
+		font-size: 0.82rem;
+		overflow-x: auto;
+	}
+	.run-row {
+		display: grid;
+		grid-template-columns: 1.4fr 1fr 2fr 1fr 1fr 1fr;
+		gap: 0.5rem;
+		padding: 0.4rem 0.2rem;
+		border-top: 1px solid var(--border);
+		align-items: baseline;
+		min-width: 34rem;
+	}
+	.run-row-head {
+		border-top: none;
+		font-size: 0.66rem;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: var(--text-muted);
+		font-weight: 700;
+	}
+	.run-row .num {
+		text-align: right;
+		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	}
+	.run-wall-name {
+		font-weight: 600;
+	}
+	.run-makeup {
+		font-size: 0.74rem;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.run-wall-total {
+		font-weight: 700;
+		color: var(--text);
+	}
+	.typed-tag {
+		display: inline-block;
+		font-size: 0.62rem;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		font-weight: 700;
+		color: #9fc7ff;
+		border: 1px solid rgba(159, 199, 255, 0.5);
+		border-radius: 4px;
+		padding: 0 0.25rem;
+		margin-left: 0.25rem;
+	}
+
+	.rates-editor {
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		padding: 0.75rem 0.875rem;
+	}
+	.rates-editor h4 {
+		margin: 0 0 0.5rem;
+		font-size: 0.85rem;
+	}
+	.rates-cols {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+		gap: 1rem;
+	}
+	.rates-label {
+		font-size: 0.7rem;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: var(--text-muted);
+	}
+	.rates-list {
+		list-style: none;
+		padding: 0;
+		margin: 0.4rem 0 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.35rem;
+	}
+	.rates-list li {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		gap: 0.5rem;
+		font-size: 0.8rem;
+	}
+	.rates-list .input-with-unit {
+		gap: 0.2rem;
+	}
+	.rates-list input {
+		width: 4rem;
+		background: var(--surface);
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		padding: 0.25rem 0.4rem;
+		color: var(--text);
+		font-size: 0.82rem;
+		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+		outline: none;
+		text-align: right;
+	}
+	.rates-list input:focus {
+		border-color: var(--accent);
+	}
 	.status {
 		display: inline-flex;
 		align-items: center;
